@@ -232,7 +232,7 @@ int ObFileSqlUtils::parse_options(const std::vector<std::string> &args, ObFileTa
   int ret = OB_SUCCESS; o = ObFileTableOptions();
   if (args.empty() || args[0].empty()) ret = OB_INVALID_ARGUMENT; else o.path_ = args[0];
   for (size_t i = 1; OB_SUCC(ret) && i < args.size(); i += 2) {
-    if (i + 1 >= args.size()) ret = OB_INVALID_ARGUMENT;
+    if (i + 1 >= args.size()) ret = OB_ERR_PARSE_SQL;
     else {
       std::string n = lower(args[i]); const std::string &v = args[i + 1];
       if (n == "delimiter" || n == "delim") { if (v.size() != 1) ret = OB_INVALID_ARGUMENT; else o.delimiter_ = v[0]; }

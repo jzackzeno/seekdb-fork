@@ -7674,7 +7674,9 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
       }
     }
     if (OB_SUCC(ret) && OB_FAIL(ObFileSqlUtils::parse_options(args, options))) {
-      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "invalid file table option");
+      if (OB_ERR_PARSE_SQL != ret) {
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "invalid file table option");
+      }
     }
     if (OB_SUCC(ret)) {
       std::string check_path = options.path_;
