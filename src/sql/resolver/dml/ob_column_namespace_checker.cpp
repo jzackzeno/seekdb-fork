@@ -17,6 +17,7 @@
 #define USING_LOG_PREFIX SQL_RESV
 #include "ob_column_namespace_checker.h"
 #include "sql/resolver/dml/ob_dml_resolver.h"
+#include "sql/ob_file_sql_utils.h"
 
 namespace oceanbase
 {
@@ -313,9 +314,23 @@ int ObColumnNamespaceChecker::check_column_exists(const TableItem &table_item, c
         table_id, col_name, is_exist))) {
     }
   } else if (table_item.is_function_table()) {
-    if (OB_FAIL(ObResolverUtils::check_function_table_column_exist(table_item,
-                                                                   params_,
-                                                                   col_name))) {
+    if (OB_NOT_NULL(table_item.function_table_expr_)
+        && ObFileSqlUtils::is_file_expr_type(table_item.function_table_expr_->get_expr_type())) {
+      if (OB_ISNULL(dml_stmt_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        for (int64_t i = 0; !is_exist && i < dml_stmt_->get_column_size(); ++i) {
+          const ColumnItem *column_item = dml_stmt_->get_column_item(i);
+          if (OB_NOT_NULL(column_item)
+              && column_item->table_id_ == table_item.table_id_
+              && ObCharset::case_insensitive_equal(column_item->column_name_, col_name)) {
+            is_exist = true;
+          }
+        }
+      }
+    } else if (OB_FAIL(ObResolverUtils::check_function_table_column_exist(table_item,
+                                                                          params_,
+                                                                          col_name))) {
     } else {
       is_exist = true;
     }

@@ -8449,9 +8449,19 @@ int ObDMLResolver::get_columns_from_table_item(const TableItem *table_item, ObIA
       }
     }
   } else if (table_item->is_function_table()) {
-    OZ (ObResolverUtils::get_all_function_table_column_names(*table_item,
-                                                             params_,
-                                                             column_names));
+    if (OB_NOT_NULL(table_item->function_table_expr_)
+        && ObFileSqlUtils::is_file_expr_type(table_item->function_table_expr_->get_expr_type())) {
+      for (int64_t i = 0; OB_SUCC(ret) && i < get_stmt()->get_column_size(); ++i) {
+        const ColumnItem *column_item = get_stmt()->get_column_item(i);
+        if (OB_NOT_NULL(column_item) && column_item->table_id_ == table_item->table_id_) {
+          OZ (column_names.push_back(column_item->column_name_));
+        }
+      }
+    } else {
+      OZ (ObResolverUtils::get_all_function_table_column_names(*table_item,
+                                                               params_,
+                                                               column_names));
+    }
   } else if (table_item->is_basic_table() || table_item->is_fake_cte_table()) {
     /**
      * LINK_TABLE and CTE_TABLE is same as BASIC_TABLE or ALIAS_TABLE
