@@ -18,34 +18,34 @@
 #include "ob_expr_ai_complete.h"
 #include "query/ai/ob_ai_endpoint_resolver.h"
 #include "share/rc/ob_server_runtime.h"
+#include "common/json_type/ob_json_base.h"
 
 using namespace oceanbase::common;
 using namespace oceanbase::sql;
 
-namespace oceanbase 
+namespace oceanbase
 {
-namespace sql 
+namespace sql
 {
 ObExprAIComplete::ObExprAIComplete(common::ObIAllocator &alloc)
-    : ObFuncExprOperator(alloc, 
-                        T_FUN_SYS_AI_COMPLETE, 
+    : ObFuncExprOperator(alloc,
+                        T_FUN_SYS_AI_COMPLETE,
                         N_AI_COMPLETE,
-                        MORE_THAN_ZERO, 
+                        MORE_THAN_ZERO,
                         NOT_VALID_FOR_GENERATED_COL,
-                        NOT_ROW_DIMENSION) 
+                        NOT_ROW_DIMENSION)
 {
 }
 
-ObExprAIComplete::~ObExprAIComplete() 
+ObExprAIComplete::~ObExprAIComplete()
 {
 }
 
 int ObExprAIComplete::calc_result_typeN(ObExprResType &type,
                                         ObExprResType *types_stack,
                                         int64_t param_num,
-                                        common::ObExprTypeCtx &type_ctx) const 
+                                        common::ObExprTypeCtx &type_ctx) const
 {
-
   UNUSED(type_ctx);
   int ret = OB_SUCCESS;
   if (OB_UNLIKELY(param_num < 2 || param_num > 3)) {
@@ -58,6 +58,7 @@ int ObExprAIComplete::calc_result_typeN(ObExprResType &type,
     if (ob_is_string_type(types_stack[PROMPT_IDX].get_type())) {
       types_stack[PROMPT_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
     } else if (ob_is_json(types_stack[PROMPT_IDX].get_type())) {
+      // JSON prompt objects are supported.
     } else {
       ret = OB_ERR_INVALID_TYPE_FOR_OP;
     }
@@ -66,7 +67,8 @@ int ObExprAIComplete::calc_result_typeN(ObExprResType &type,
     } else if (param_num == 3) {
       ObObjType in_type = types_stack[CONFIG_IDX].get_type();
       if (OB_FAIL(ObJsonExprHelper::is_valid_for_json(types_stack, CONFIG_IDX, N_AI_COMPLETE))) {
-      } else if (ob_is_string_type(in_type) && types_stack[CONFIG_IDX].get_collation_type() != CS_TYPE_BINARY) {
+      } else if (ob_is_string_type(in_type) &&
+                 types_stack[CONFIG_IDX].get_collation_type() != CS_TYPE_BINARY) {
         if (types_stack[CONFIG_IDX].get_charset_type() != CHARSET_UTF8MB4) {
           types_stack[CONFIG_IDX].set_calc_collation_type(CS_TYPE_UTF8MB4_BIN);
         }
@@ -82,9 +84,9 @@ int ObExprAIComplete::calc_result_typeN(ObExprResType &type,
   return ret;
 }
 
-int ObExprAIComplete::eval_ai_complete(const ObExpr &expr, 
+int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
                                        ObEvalCtx &ctx,
-                                       ObDatum &res) 
+                                       ObDatum &res)
 {
   INIT_SUCC(ret);
   ObDatum *arg_model_id = nullptr;
@@ -97,7 +99,6 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     res.set_null();
   } else {
     ObEvalCtx::TempAllocGuard tmp_alloc_g(ctx);
-    
     MultimodeAlloctor temp_allocator(tmp_alloc_g.get_allocator());
     lib::ObMallocHookAttrGuard malloc_guard(lib::ObMemAttr(N_AI_COMPLETE));
     ObAIFuncExprInfo *info = nullptr;
@@ -109,33 +110,58 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
     const share::ObAiModelEndpointInfo *endpoint_info = &resolved_endpoint;
     query::ObIAiEndpointResolver *endpoint_resolver =
         ::oceanbase::share::server_service<::oceanbase::query::ObIAiEndpointResolver>();
-    ObExpr *arg_expr_prompt = expr.args_[1];
-    if ( OB_ISNULL(arg_expr_prompt) ) {
+
+    ObExpr *arg_expr_prompt = expr.args_[PROMPT_IDX];
+    if (OB_ISNULL(arg_expr_prompt)) {
       ret = OB_ERR_UNEXPECTED;
     } else if (arg_expr_prompt->datum_meta_.type_ == ObJsonType) {
       ObIJsonBase *j_base = nullptr;
       ObJsonObject *prompt_object = nullptr;
       bool is_null = false;
-      if (OB_FAIL(ObJsonExprHelper::get_json_doc(expr, ctx, temp_allocator, PROMPT_IDX, j_base, is_null))) {
-      } else if (j_base->json_type() != ObJsonNodeType::J_OBJECT) {
+      if (OB_FAIL(ObJsonExprHelper::get_json_doc(
+              expr, ctx, temp_allocator, PROMPT_IDX, j_base, is_null))) {
+      } else if (OB_ISNULL(j_base) || j_base->json_type() != ObJsonNodeType::J_OBJECT) {
         ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "prompt is not valid");
       } else if (OB_FALSE_IT(prompt_object = static_cast<ObJsonObject *>(j_base))) {
       } else if (!ObAIFuncPromptObjectUtils::is_valid_prompt_object(prompt_object)) {
         ret = OB_INVALID_ARGUMENT;
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, "prompt is not valid");
-        res.set_null();
-      } else if (!ObAIFuncJsonUtils::ob_is_json_array_all_str(static_cast<ObJsonArray *>(prompt_object->get_value(ObAIFuncPromptObjectUtils::prompt_args_key)))) {
-        ret = OB_NOT_SUPPORTED;
-        LOG_USER_ERROR(OB_NOT_SUPPORTED, "prompt object is not support");
-      } else if (OB_FAIL(ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(temp_allocator, prompt_object, prompt))) {
+      } else if (OB_FAIL(ObAIFuncPromptObjectUtils::replace_all_str_args_in_template(
+              temp_allocator, prompt_object, prompt))) {
       }
-    } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_prompt, expr.args_[1]->datum_meta_, expr.args_[1]->obj_meta_.has_lob_header(), prompt))) {
+    } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(
+            ctx.exec_ctx_, temp_allocator, *arg_prompt,
+            expr.args_[PROMPT_IDX]->datum_meta_,
+            expr.args_[PROMPT_IDX]->obj_meta_.has_lob_header(), prompt))) {
     }
 
+    // SQL NULL configuration means default provider settings, not JSON text.
     if (OB_FAIL(ret)) {
-    } else if (OB_NOT_NULL(arg_config)) {
-      if (OB_FAIL(ObTextStringHelper::read_real_string_data(ctx.exec_ctx_, temp_allocator, *arg_config, expr.args_[2]->datum_meta_, expr.args_[2]->obj_meta_.has_lob_header(), config_str))) {
-      } else if (OB_FAIL(ObAIFuncJsonUtils::get_json_object_form_str(temp_allocator, config_str, config))) {
+    } else if (OB_NOT_NULL(arg_config) && !arg_config->is_null()) {
+      ObIJsonBase *parsed_config = nullptr;
+      if (expr.args_[CONFIG_IDX]->datum_meta_.type_ == ObJsonType) {
+        bool is_null = false;
+        if (OB_FAIL(ObJsonExprHelper::get_json_doc(
+                expr, ctx, temp_allocator, CONFIG_IDX, parsed_config, is_null))) {
+        }
+      } else if (OB_FAIL(ObTextStringHelper::read_real_string_data(
+              ctx.exec_ctx_, temp_allocator, *arg_config,
+              expr.args_[CONFIG_IDX]->datum_meta_,
+              expr.args_[CONFIG_IDX]->obj_meta_.has_lob_header(), config_str))) {
+      } else if (OB_FAIL(ObJsonBaseFactory::get_json_base(
+              &temp_allocator, config_str,
+              ObJsonInType::JSON_TREE, ObJsonInType::JSON_TREE, parsed_config))) {
+      }
+
+      if (OB_SUCC(ret)) {
+        if (OB_ISNULL(parsed_config) ||
+            parsed_config->json_type() != ObJsonNodeType::J_OBJECT) {
+          ret = OB_INVALID_ARGUMENT;
+          LOG_USER_ERROR(OB_INVALID_ARGUMENT, "ai_complete, config must be a JSON object");
+        } else {
+          config = static_cast<ObJsonObject *>(parsed_config);
+        }
       }
     }
 
@@ -146,7 +172,7 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
       res.set_null();
     }
 
-    if (OB_FAIL(ret)){
+    if (OB_FAIL(ret)) {
     } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(temp_allocator, model_id, info))) {
     } else if (OB_ISNULL(endpoint_resolver)) {
       ret = OB_ERR_UNEXPECTED;
@@ -165,37 +191,11 @@ int ObExprAIComplete::eval_ai_complete(const ObExpr &expr,
 
 int ObExprAIComplete::cg_expr(ObExprCGCtx &expr_cg_ctx,
                               const ObRawExpr &raw_expr,
-                              ObExpr &rt_expr) const 
+                              ObExpr &rt_expr) const
 {
   INIT_SUCC(ret);
-  // TODO: support schema version match in plan cache for ai func
-  // const ObRawExpr *model_key = raw_expr.get_param_expr(0);
-  // if (OB_NOT_NULL(model_key)
-  //     && (model_key->is_static_scalar_const_expr() || model_key->is_const_expr())
-  //     && model_key->get_expr_type() != T_OP_GET_USER_VAR &&
-  //     OB_NOT_NULL(expr_cg_ctx.schema_guard_)) {
-  //   ObIAllocator *allocator = expr_cg_ctx.allocator_;
-  //   ObExecContext *exec_ctx = expr_cg_ctx.session_->get_cur_exec_ctx();
-  //   bool got_data = false;
-  //   ObObj const_data;
-  //   ObAIFuncExprInfo *info = nullptr;
-  //   if (OB_ISNULL(allocator)) {
-  //     ret = OB_ERR_UNEXPECTED;
-  //     LOG_WARN("allocator is null", K(ret));
-  //   } else if (OB_FAIL(ObSQLUtils::calc_const_or_calculable_expr(exec_ctx,
-  //                                                         model_key,
-  //                                                         const_data,
-  //                                                         got_data,
-  //                                                         *allocator))) {
-  //     LOG_WARN("failed to calc offset expr", K(ret));
-  //   } else if (!got_data || const_data.is_null()) {
-  //   } else if (OB_FAIL(ObAIFuncUtils::get_ai_func_info(*allocator, const_data.get_string(), *expr_cg_ctx.schema_guard_, info))) {
-  //     LOG_WARN("failed to get ai func info", K(ret), K(const_data.get_string()));
-  //   } else {
-  //     rt_expr.extra_info_ = info;
-  //   }
-  // }
-
+  UNUSED(expr_cg_ctx);
+  UNUSED(raw_expr);
   if (OB_SUCC(ret)) {
     rt_expr.eval_func_ = ObExprAIComplete::eval_ai_complete;
   }
