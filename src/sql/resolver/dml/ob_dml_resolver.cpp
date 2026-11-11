@@ -7657,7 +7657,10 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
         ret = OB_INVALID_ARGUMENT;
         LOG_USER_ERROR(OB_INVALID_ARGUMENT, "file table arguments must be constants");
       } else {
-        const ObObj &obj = static_cast<const ObConstRawExpr *>(real_param)->get_value();
+        const ObConstRawExpr *const_param = static_cast<const ObConstRawExpr *>(real_param);
+        const ObObj &obj = real_param->is_param_expr()
+                         ? const_param->get_param()
+                         : const_param->get_value();
         if (obj.is_string_type()) {
           const ObString str = obj.get_string();
           args.push_back(std::string(str.ptr(), str.length()));
