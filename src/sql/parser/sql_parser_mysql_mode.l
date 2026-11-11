@@ -1479,6 +1479,7 @@ BEGIN(in_c_comment);
   }
 }
 ":="  {return SET_VAR;}
+"=>"  {return SET_VAR;}
 "<=>"  {return COMP_NSEQ;}
 ">=" {return COMP_GE;}
 ">"  {return COMP_GT;}

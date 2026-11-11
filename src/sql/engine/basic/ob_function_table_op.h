@@ -20,6 +20,7 @@
 #include "sql/engine/ob_operator.h"
 #include "sql/engine/basic/ob_chunk_datum_store.h"
 #include "lib/charset/ob_charset.h"
+#include "sql/ob_file_sql_utils.h"
 
 namespace oceanbase
 {
@@ -32,10 +33,12 @@ class ObFunctionTableSpec : public ObOpSpec
 OB_UNIS_VERSION_V(1);
 public:
   ObFunctionTableSpec(common::ObIAllocator &alloc, const ObPhyOperatorType type)
-    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc), has_correlated_expr_(false)
+    : ObOpSpec(alloc, type), value_expr_(nullptr), column_exprs_(alloc),
+      column_idxs_(alloc), has_correlated_expr_(false)
   {}
   ObExpr *value_expr_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> column_exprs_;
+  common::ObFixedArray<int64_t, common::ObIAllocator> column_idxs_;
   bool has_correlated_expr_;
 };
 
@@ -48,18 +51,22 @@ public:
     already_calc_(false),
     row_count_(0),
     col_count_(0),
-    value_table_(NULL) 
+    value_table_(NULL),
+    file_scan_(false),
+    next_row_func_(NULL)
   {}
 
   virtual int inner_open() override;
   virtual int inner_rescan() override;
   virtual int inner_get_next_row() override;
-  //virtual int inner_get_next_batch(int64_t max_row_cnt) override;
+  virtual int inner_get_next_batch(const int64_t max_row_cnt) override;
   virtual int inner_close() override;
   virtual void destroy() override;
 private:
   int inner_get_next_row_udf();
   int inner_get_next_row_sys_func();
+  int inner_get_next_row_file();
+  int init_file_scan();
   int get_current_result(common::ObObj &result);
   int64_t node_idx_;
   bool already_calc_;
@@ -67,6 +74,15 @@ private:
   int64_t col_count_;
   common::ObObj value_;
   pl::ObPLCollection *value_table_;
+  bool file_scan_;
+  ObFileTableFormat file_format_;
+  ObFileTableOptions file_options_;
+  std::vector<ObFileTableColumn> file_columns_;
+  std::vector<std::string> file_row_values_;
+  std::vector<bool> file_row_nulls_;
+  std::vector<std::vector<std::string> > file_batch_values_;
+  std::vector<std::vector<bool> > file_batch_nulls_;
+  ObFileTableScanner file_scanner_;
   int (ObFunctionTableOp::*next_row_func_)();
 };
 

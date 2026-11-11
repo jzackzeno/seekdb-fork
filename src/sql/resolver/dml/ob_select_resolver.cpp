@@ -2989,12 +2989,18 @@ int ObSelectResolver::resolve_into_file_node(const ParseNode *list_node, ObSelec
 int ObSelectResolver::resolve_into_outfile_with_format(const ParseNode *node, ObSelectIntoItem &into_item)
 {
   int ret = OB_SUCCESS;
+  bool file_sql_enabled = false;
   bool has_format_type = false;
   bool has_cs_type = false;
   ObExternalFileFormat external_format;
   ParseNode* format_node = NULL;
   ParseNode* option_node = NULL;
-  if (node->num_child_ != 3) {
+  if (node->value_ == 1
+      && OB_FAIL(session_info_->get_sys_variable(SYS_VAR_ENABLE_FILE_SQL, file_sql_enabled))) {
+  } else if (node->value_ == 1 && !file_sql_enabled) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY is disabled; set enable_file_sql = 1 first");
+  } else if (node->num_child_ != 3) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(resolve_into_const_node(node->children_[0], into_item.outfile_name_))) {
   }
@@ -3048,7 +3054,13 @@ int ObSelectResolver::resolve_into_outfile_without_format(const ParseNode *node,
                                                           ObSelectIntoItem &into_item)
 {
   int ret = OB_SUCCESS;
-  if (node->num_child_ != 5) {
+  bool file_sql_enabled = false;
+  if (node->value_ == 1
+      && OB_FAIL(session_info_->get_sys_variable(SYS_VAR_ENABLE_FILE_SQL, file_sql_enabled))) {
+  } else if (node->value_ == 1 && !file_sql_enabled) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "COPY is disabled; set enable_file_sql = 1 first");
+  } else if (node->num_child_ != 5) {
     ret = OB_ERR_UNEXPECTED;
   } else if (OB_FAIL(resolve_into_const_node(node->children_[0], into_item.outfile_name_))) {
   }

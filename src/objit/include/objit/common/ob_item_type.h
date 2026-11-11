@@ -868,6 +868,11 @@ typedef enum ObItemType
   T_FUN_SYS_EMBEDDED_VEC = 1928,
   T_FUN_SYS_AI_PROMPT = 1929,
   T_FUN_SYS_VEC_VISIBLE = 1930, // vector index table 5
+  T_FUN_SYS_READ_CSV = 1931,
+  T_FUN_SYS_READ_JSON = 1932,
+  T_FUN_SYS_READ_NDJSON = 1933,
+  T_FUN_SYS_READ_PARQUET = 1934,
+  T_FUN_SYS_GLOB = 1935,
 
   ///< @note add new sys function type before this line
   T_FUN_SYS_END = 2000,

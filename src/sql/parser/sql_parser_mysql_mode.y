@@ -372,7 +372,7 @@ END_P SET_VAR DELIMITER
         ORGANIZATION
 //-----------------------------non_reserved keyword end---------------------------------------------
 %type <node> sql_stmt stmt_list stmt opt_end_p
-%type <node> select_stmt update_stmt delete_stmt
+%type <node> select_stmt copy_stmt copy_options_opt copy_option_list copy_option update_stmt delete_stmt
 %type <node> insert_stmt single_table_insert values_clause dml_table_name
 %type <node> create_table_stmt create_table_like_stmt fork_table_stmt fork_database_stmt diff_table_stmt merge_table_stmt opt_table_option_list table_option_list table_option table_option_list_space_seperated parallel_option lob_storage_clause lob_storage_parameter lob_storage_parameters lob_chunk_size
 %type <node> index_or_heap
@@ -497,7 +497,7 @@ END_P SET_VAR DELIMITER
 %type <node> dynamic_sampling_hint
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
-%type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
+%type <node> json_table_expr unnest_expr file_table_expr file_table_arg file_table_arg_list mock_jt_on_error_on_empty jt_column_list json_table_column_def
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
 %type <node> table_values_clause table_values_clause_with_order_by_and_limit values_row_list row_value
@@ -556,6 +556,7 @@ opt_end_p:
 /* only preparable statement will set question mark size */
 stmt:
     select_stmt             { $$ = $1; question_mark_issue($$, result); }
+  | copy_stmt               { $$ = $1; question_mark_issue($$, result); }
   | insert_stmt             { $$ = $1; question_mark_issue($$, result); }
   | create_table_stmt       {
     $$ = $1;
@@ -8428,6 +8429,112 @@ expr { $$ = $1;}
  *
  *****************************************************************************/
 
+copy_stmt:
+COPY '(' select_no_parens ')' TO STRING_VALUE copy_options_opt
+{
+  ParseNode *into_node = NULL;
+  if (NULL == $7) {
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 5,
+                             $6, NULL, NULL, NULL, NULL);
+  } else {
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                             $6, $7, NULL);
+  }
+  into_node->value_ = 1; /* COPY uses enable_file_sql; ordinary SELECT INTO does not. */
+  if ($3->children_[PARSE_SELECT_INTO] != NULL || $3->children_[PARSE_SELECT_INTO_EXTRA] != NULL) {
+    yyerror(&@1, result, "COPY query already contains INTO");
+    YYERROR;
+  }
+  $3->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+  $$ = $3;
+}
+| COPY relation_factor TO STRING_VALUE copy_options_opt
+{
+  ParseNode *star = NULL;
+  ParseNode *project = NULL;
+  ParseNode *project_list = NULL;
+  ParseNode *table = NULL;
+  ParseNode *from_list = NULL;
+  ParseNode *into_node = NULL;
+  malloc_terminal_node(star, result->malloc_pool_, T_STAR);
+  malloc_non_terminal_node(project, result->malloc_pool_, T_PROJECT_STRING, 1, star);
+  dup_string_to_node(project, result->malloc_pool_, "*");
+  merge_nodes(project_list, result, T_PROJECT_LIST, project);
+  malloc_non_terminal_node(table, result->malloc_pool_, T_ORG, 4, $2, NULL, NULL, NULL);
+  merge_nodes(from_list, result, T_FROM_LIST, table);
+  malloc_select_node($$, result->malloc_pool_);
+  $$->children_[PARSE_SELECT_SELECT] = project_list;
+  $$->children_[PARSE_SELECT_FROM] = from_list;
+  if (NULL == $5) {
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 5,
+                             $4, NULL, NULL, NULL, NULL);
+  } else {
+    malloc_non_terminal_node(into_node, result->malloc_pool_, T_INTO_OUTFILE, 3,
+                             $4, $5, NULL);
+  }
+  into_node->value_ = 1;
+  $$->children_[PARSE_SELECT_INTO_EXTRA] = into_node;
+}
+;
+
+copy_options_opt:
+/* EMPTY */
+{
+  $$ = NULL;
+}
+| '(' copy_option_list ')'
+{
+  merge_nodes($$, result, T_EXTERNAL_FILE_FORMAT, $2);
+}
+;
+
+copy_option_list:
+copy_option
+{
+  $$ = $1;
+}
+| copy_option_list ',' copy_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+copy_option:
+FORMAT relation_name
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_EXTERNAL_FILE_FORMAT_TYPE, 1, $2);
+}
+| PARSE_HEADER
+{
+  ParseNode *enabled = NULL;
+  malloc_terminal_node(enabled, result->malloc_pool_, T_INT);
+  enabled->value_ = 1;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_SKIP_HEADER, 1, enabled);
+}
+| FIELD_OPTIONALLY_ENCLOSED_BY expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_OPTIONALLY_CLOSED_STR, 1, $2);
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+| NULL_IF_EXETERNAL expr
+{
+  ParseNode *expr_list_node = NULL;
+  malloc_list_node(expr_list_node, result->malloc_pool_, T_EXPR_LIST, 2, 1, $2);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_NULL_IF_EXETERNAL, 1, expr_list_node);
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+| DELIMITER expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_FIELD_TERMINATED_STR, 1, $2);
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+| ESCAPE expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ESCAPED_STR, 1, $2);
+  dup_expr_string($$, result, @2.first_column, @2.last_column);
+}
+;
+
 select_stmt:
 select_no_parens opt_when
 {
@@ -10835,6 +10942,10 @@ tbl_name
 {
   $$ = $1;
 }
+| file_table_expr
+{
+  $$ = $1;
+}
 | '(' table_references ')'
 {
   $$ = $2;
@@ -10847,6 +10958,67 @@ tbl_name
 | hybrid_search_expr
 {
   $$ = $1;
+}
+;
+
+file_table_expr:
+function_name '(' file_table_arg_list ')'
+{
+  ParseNode *params = NULL;
+  ParseNode *func = NULL;
+  merge_nodes(params, result, T_EXPR_LIST, $3);
+  malloc_non_terminal_node(func, result->malloc_pool_, T_FUN_SYS, 2, $1, params);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 2, func, NULL);
+}
+| function_name '(' file_table_arg_list ')' relation_name
+{
+  ParseNode *params = NULL;
+  ParseNode *func = NULL;
+  merge_nodes(params, result, T_EXPR_LIST, $3);
+  malloc_non_terminal_node(func, result->malloc_pool_, T_FUN_SYS, 2, $1, params);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 2, func, $5);
+}
+| function_name '(' file_table_arg_list ')' AS relation_name
+{
+  ParseNode *params = NULL;
+  ParseNode *func = NULL;
+  merge_nodes(params, result, T_EXPR_LIST, $3);
+  malloc_non_terminal_node(func, result->malloc_pool_, T_FUN_SYS, 2, $1, params);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_TABLE_COLLECTION_EXPRESSION, 2, func, $6);
+}
+;
+
+file_table_arg_list:
+file_table_arg
+{
+  $$ = $1;
+}
+| file_table_arg_list ',' file_table_arg
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+file_table_arg:
+expr
+{
+  if ($1->type_ == T_OP_EQ && $1->num_child_ == 2
+      && $1->children_[0] != NULL && $1->children_[0]->type_ == T_COLUMN_REF
+      && $1->children_[0]->num_child_ == 3
+      && $1->children_[0]->children_[0] == NULL
+      && $1->children_[0]->children_[1] == NULL
+      && $1->children_[0]->children_[2] != NULL) {
+    ParseNode *name = $1->children_[0]->children_[2];
+    name->type_ = T_VARCHAR;
+    malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, name, $1->children_[1]);
+  } else {
+    $$ = $1;
+  }
+}
+| relation_name SET_VAR expr
+{
+  $1->type_ = T_VARCHAR;
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
 }
 ;
 

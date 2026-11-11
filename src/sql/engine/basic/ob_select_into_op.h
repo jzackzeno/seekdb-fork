@@ -64,6 +64,7 @@ public:
       closed_cht_(),
       is_optional_(false),
       select_exprs_(alloc),
+      column_names_(alloc),
       is_single_(true),
       max_file_size_(DEFAULT_MAX_FILE_SIZE),
       escaped_cht_(),
@@ -83,6 +84,7 @@ public:
   common::ObObj closed_cht_;
   bool is_optional_;
   common::ObFixedArray<ObExpr*, common::ObIAllocator> select_exprs_;
+  common::ObFixedArray<common::ObString, common::ObIAllocator> column_names_;
   bool is_single_;
   int64_t max_file_size_;
   common::ObObj escaped_cht_;
@@ -125,6 +127,9 @@ public:
       has_compress_(false),
       external_properties_(),
       format_type_(ObExternalFileFormat::FormatType::CSV_FORMAT),
+      write_header_(false),
+      header_written_(false),
+      null_string_(),
       block_id_(0),
       need_commit_(true)
   {
@@ -211,6 +216,7 @@ private:
                          ObString &str,
                          ObCollationType coll_type);
   int print_field(const ObObj &obj, ObCsvFileWriter &data_writer);
+  int write_csv_header(ObCsvFileWriter &data_writer);
   int print_lob_field(const ObObj &obj,
                       const ObExpr &expr,
                       const ObDatum &datum,
@@ -290,6 +296,9 @@ private:
   bool has_compress_;
   ObExternalFileFormat external_properties_;
   ObExternalFileFormat::FormatType format_type_;
+  bool write_header_;
+  bool header_written_;
+  ObString null_string_;
   uint32_t block_id_;
   bool need_commit_;
   static const int64_t SHARED_BUFFER_SIZE = 2LL * 1024 * 1024;

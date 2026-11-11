@@ -41,6 +41,7 @@
 #include "sql/resolver/dcl/ob_dcl_resolver.h"
 #include "sql/resolver/ddl/ob_ddl_resolver.h"
 #include "sql/hybrid_search/ob_hybrid_search_executor.h"
+#include "sql/ob_file_sql_utils.h"
 
 namespace oceanbase
 {
@@ -7625,8 +7626,6 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   ObRawExpr *table_expr = NULL;
   ColumnItem *col_item = NULL;
   ObDMLStmt *stmt = get_stmt();
-  const ObUserDefinedType *user_type = NULL;
-
   CK (OB_NOT_NULL(stmt));
   CK (OB_LIKELY(table_item.is_function_table()));
   CK (OB_NOT_NULL(table_expr = table_item.function_table_expr_));
@@ -7635,6 +7634,78 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
   } else if (!ObResolverUtils::is_expr_can_be_used_in_table_function(*table_expr)) {
     ret = OB_NOT_SUPPORTED;
     LOG_USER_ERROR(OB_NOT_SUPPORTED, "access rows from a non-nested table item");
+  } else if (ObFileSqlUtils::is_file_expr_type(table_expr->get_expr_type())) {
+    bool enabled = false;
+    std::vector<std::string> args;
+    ObFileTableOptions options;
+    std::vector<ObFileTableColumn> columns;
+    ObFileSnapshot snapshot;
+    ObString secure_file_priv;
+    if (OB_FAIL(session_info_->get_sys_variable(SYS_VAR_ENABLE_FILE_SQL, enabled))) {
+    } else if (!enabled) {
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "file SQL is disabled; set enable_file_sql = 1 first");
+    }
+    for (int64_t i = 0; OB_SUCC(ret) && i < table_expr->get_param_count(); ++i) {
+      ObRawExpr *param = table_expr->get_param_expr(i);
+      if (OB_ISNULL(param) || !param->is_const_raw_expr()) {
+        ret = OB_INVALID_ARGUMENT;
+        LOG_USER_ERROR(OB_INVALID_ARGUMENT, "file table arguments must be constants");
+      } else {
+        const ObObj &obj = static_cast<ObConstRawExpr *>(param)->get_value();
+        if (obj.is_string_type()) {
+          const ObString str = obj.get_string();
+          args.push_back(std::string(str.ptr(), str.length()));
+        } else if (obj.is_uint64()) {
+          args.push_back(std::to_string(obj.get_uint64()));
+        } else if (obj.is_integer_type()) {
+          args.push_back(std::to_string(obj.get_int()));
+        } else {
+          ret = OB_INVALID_ARGUMENT;
+        }
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(ObFileSqlUtils::parse_options(args, options))) {
+      LOG_USER_ERROR(OB_INVALID_ARGUMENT, "invalid file table option");
+    }
+    if (OB_SUCC(ret)) {
+      std::string check_path = options.path_;
+      if (table_expr->get_expr_type() == T_FUN_SYS_GLOB) {
+        const size_t slash = check_path.find_last_of("/\\");
+        check_path = slash == std::string::npos ? "." : check_path.substr(0, slash);
+      }
+      std::string canonical;
+      if (OB_FAIL(ObFileSqlUtils::canonicalize_path(check_path, canonical))) {
+      } else if (OB_FAIL(session_info_->get_secure_file_priv(secure_file_priv))) {
+      } else {
+        ObString canonical_str(static_cast<int32_t>(canonical.length()), canonical.data());
+        if (OB_FAIL(ObResolverUtils::check_secure_path(secure_file_priv, canonical_str))) {
+        } else if (table_expr->get_expr_type() != T_FUN_SYS_GLOB) {
+          options.path_ = canonical;
+        }
+      }
+    }
+    if (OB_SUCC(ret) && OB_FAIL(ObFileSqlUtils::infer_schema(
+          ObFileSqlUtils::format_from_expr_type(table_expr->get_expr_type()), options, columns, snapshot))) {
+      LOG_WARN("failed to infer file table schema", K(ret), K(options.path_.c_str()));
+    }
+    for (size_t i = 0; OB_SUCC(ret) && i < columns.size(); ++i) {
+      ObString column_name;
+      ObObjMeta meta;
+      ObAccuracy accuracy;
+      meta.set_type(columns[i].type_);
+      if (columns[i].type_ == ObVarcharType) {
+        meta.set_collation_type(session_info_->get_local_collation_connection());
+        accuracy.set_length(std::max<int64_t>(1, columns[i].max_length_));
+      }
+      if (OB_FAIL(ob_write_string(*allocator_, ObString(columns[i].name_.length(), columns[i].name_.data()), column_name))) {
+      } else if (NULL != (col_item = stmt->get_column_item(table_item.table_id_, column_name))) {
+      } else if (OB_FAIL(resolve_function_table_column_item(table_item, meta, accuracy, column_name,
+                                                            OB_APP_MIN_COLUMN_ID + i, col_item))) {
+      } else if (OB_FAIL(col_items.push_back(*col_item))) {
+      }
+    }
+    return ret;
   } else if (NULL != (col_item = stmt->get_column_item(table_item.table_id_, ObString("COLUMN_VALUE")))) {
     //exist, ignore resolve...
   } else {

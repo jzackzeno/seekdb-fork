@@ -35,6 +35,7 @@ public:
         outfile_name_(),
         field_str_(),
         line_str_(),
+        column_names_(),
         user_vars_(),
         closed_cht_(),
         is_optional_(true),
@@ -71,6 +72,14 @@ public:
       if (OB_FAIL(user_vars_.push_back(user_vars.at(i)))) {
       }
     }
+  }
+  inline common::ObIArray<common::ObString> &get_column_names()
+  {
+    return column_names_;
+  }
+  inline const common::ObIArray<common::ObString> &get_column_names() const
+  {
+    return column_names_;
   }
   inline void set_is_optional(bool is_optional)
   {
@@ -178,6 +187,7 @@ private:
   common::ObObj field_str_;
   common::ObObj line_str_;
   common::ObSEArray<ObRawExpr*, 8, common::ModulePageAllocator, true> select_exprs_;
+  common::ObSEArray<common::ObString, 8, common::ModulePageAllocator, true> column_names_;
   common::ObSEArray<common::ObString, 16, common::ModulePageAllocator, true> user_vars_;
   common::ObObj closed_cht_;
   bool is_optional_;
