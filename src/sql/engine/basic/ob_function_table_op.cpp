@@ -281,8 +281,19 @@ int ObFunctionTableOp::init_file_scan()
       if (file_idx < 0 || file_idx >= static_cast<int64_t>(file_columns_.size())) {
         ret = OB_ERR_UNEXPECTED;
       } else {
-        ObObjType inferred = file_columns_[file_idx].type_;
-        if (inferred != MY_SPEC.column_exprs_.at(i)->datum_meta_.type_) ret = OB_ERR_UNEXPECTED;
+        const ObObjType inferred_type = file_columns_[file_idx].type_;
+        const ObObjType runtime_type = MY_SPEC.column_exprs_.at(i)->datum_meta_.type_;
+        // The expression engine may normalize a BOOLEAN/TINYINT file column
+        // to INT while generating the physical plan.  Both use the same datum
+        // representation and are handled by the integer conversion below.
+        const bool compatible = inferred_type == runtime_type
+            || (inferred_type == ObTinyIntType && runtime_type == ObIntType)
+            || (inferred_type == ObIntType && runtime_type == ObTinyIntType);
+        if (!compatible) {
+          ret = OB_ERR_UNEXPECTED;
+          LOG_WARN("file table column type changed after resolution", K(ret), K(i), K(file_idx),
+                   K(inferred_type), K(runtime_type));
+        }
       }
     }
     if (OB_SUCC(ret)) {
@@ -397,6 +408,13 @@ int ObFunctionTableOp::inner_get_next_batch(const int64_t max_row_cnt)
             break;
         }
       }
+    }
+    if (OB_SUCC(ret)) {
+      // File-table columns are produced by this operator.  Mark them projected
+      // for batch evaluation as well, otherwise a parent expression (for
+      // example REPLACE(note, ...)) may try to evaluate the column reference
+      // itself instead of consuming the datums populated above.
+      expr->set_evaluated_projected(eval_ctx_);
     }
   }
   if (OB_SUCC(ret)) {
