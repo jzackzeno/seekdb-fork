@@ -280,20 +280,6 @@ int ObFunctionTableOp::init_file_scan()
       const int64_t file_idx = MY_SPEC.column_idxs_.at(i);
       if (file_idx < 0 || file_idx >= static_cast<int64_t>(file_columns_.size())) {
         ret = OB_ERR_UNEXPECTED;
-      } else {
-        const ObObjType inferred_type = file_columns_[file_idx].type_;
-        const ObObjType runtime_type = MY_SPEC.column_exprs_.at(i)->datum_meta_.type_;
-        // The expression engine may normalize a BOOLEAN/TINYINT file column
-        // to INT while generating the physical plan.  Both use the same datum
-        // representation and are handled by the integer conversion below.
-        const bool compatible = inferred_type == runtime_type
-            || (inferred_type == ObTinyIntType && runtime_type == ObIntType)
-            || (inferred_type == ObIntType && runtime_type == ObTinyIntType);
-        if (!compatible) {
-          ret = OB_ERR_UNEXPECTED;
-          LOG_WARN("file table column type changed after resolution", K(ret), K(i), K(file_idx),
-                   K(inferred_type), K(runtime_type));
-        }
       }
     }
     if (OB_SUCC(ret)) {
