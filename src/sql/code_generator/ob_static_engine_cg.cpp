@@ -5524,19 +5524,39 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
       if (OB_FAIL(mark_expr_self_produced(op.get_output_exprs().at(i)))) {
       }
     }
-    for (int64_t i = 0; OB_SUCC(ret) && i < op.get_stmt()->get_column_size(); ++i) {
-      ObExpr *rt_expr = nullptr;
-      const ColumnItem *col_item = op.get_stmt()->get_column_item(i);
-      CK (OB_NOT_NULL(col_item));
-      CK (OB_NOT_NULL(col_item->expr_));
-      if (OB_SUCC(ret)
-          && col_item->table_id_ == op.get_table_id()
-          && col_item->expr_->is_explicited_reference()) {
-        OZ (mark_expr_self_produced(col_item->expr_));
-        OZ (generate_rt_expr(*col_item->expr_, rt_expr));
-        OZ (spec.column_exprs_.push_back(rt_expr));
-        if (OB_SUCC(ret) && is_file_table_expr_type(value_raw_expr->get_expr_type())) {
-          OZ (spec.column_idxs_.push_back(col_item->column_id_ - OB_APP_MIN_COLUMN_ID));
+    if (is_file_table_expr_type(value_raw_expr->get_expr_type())) {
+      // The optimizer has already selected and allocated the file columns that
+      // this operator must produce.  Generate the physical expressions from
+      // that access list instead of walking every explicitly referenced
+      // statement column: some of those can be pruned or replaced by upper
+      // operators and therefore have no runtime frame.
+      ObIArray<ObRawExpr *> &access_exprs = op.get_access_exprs();
+      for (int64_t i = 0; OB_SUCC(ret) && i < access_exprs.count(); ++i) {
+        ObRawExpr *raw_expr = access_exprs.at(i);
+        ObExpr *rt_expr = nullptr;
+        CK (OB_NOT_NULL(raw_expr));
+        CK (raw_expr->is_column_ref_expr());
+        if (OB_SUCC(ret)) {
+          ObColumnRefRawExpr *column_expr = static_cast<ObColumnRefRawExpr *>(raw_expr);
+          CK (column_expr->get_table_id() == op.get_table_id());
+          OZ (mark_expr_self_produced(column_expr));
+          OZ (generate_rt_expr(*column_expr, rt_expr));
+          OZ (spec.column_exprs_.push_back(rt_expr));
+          OZ (spec.column_idxs_.push_back(column_expr->get_column_id() - OB_APP_MIN_COLUMN_ID));
+        }
+      }
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < op.get_stmt()->get_column_size(); ++i) {
+        ObExpr *rt_expr = nullptr;
+        const ColumnItem *col_item = op.get_stmt()->get_column_item(i);
+        CK (OB_NOT_NULL(col_item));
+        CK (OB_NOT_NULL(col_item->expr_));
+        if (OB_SUCC(ret)
+            && col_item->table_id_ == op.get_table_id()
+            && col_item->expr_->is_explicited_reference()) {
+          OZ (mark_expr_self_produced(col_item->expr_));
+          OZ (generate_rt_expr(*col_item->expr_, rt_expr));
+          OZ (spec.column_exprs_.push_back(rt_expr));
         }
       }
     }
