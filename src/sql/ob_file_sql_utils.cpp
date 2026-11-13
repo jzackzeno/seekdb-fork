@@ -307,6 +307,12 @@ ObObjType ObFileSqlUtils::widen_type(ObObjType a, ObObjType b)
   if (a == ObNullType) return b; if (b == ObNullType || a == b) return a;
   if ((a == ObIntType && b == ObDoubleType) || (a == ObDoubleType && b == ObIntType)) return ObDoubleType;
   if ((a == ObDateType && b == ObDateTimeType) || (a == ObDateTimeType && b == ObDateType)) return ObDateTimeType;
+  // BOOLEAN is stored as TinyInt: true/false mixed with integers is still
+  // numeric (1/0), and mixed with doubles is a double. Without this a
+  // column holding e.g. true, 1, false widened to VARCHAR and lost its
+  // numeric/boolean meaning.
+  if ((a == ObTinyIntType && b == ObIntType) || (a == ObIntType && b == ObTinyIntType)) return ObIntType;
+  if ((a == ObTinyIntType && b == ObDoubleType) || (a == ObDoubleType && b == ObTinyIntType)) return ObDoubleType;
   return ObVarcharType;
 }
 
@@ -346,9 +352,17 @@ int ObFileSqlUtils::infer_schema(ObFileTableFormat fmt, const ObFileTableOptions
                                  std::vector<ObFileTableColumn> &cols, ObFileSnapshot &snap)
 {
   int ret = OB_SUCCESS; cols.clear();
-  if (!o.format_.empty()
-      && (fmt != FILE_FORMAT_JSONL
-          || (o.format_ != "newline_delimited" && o.format_ != "ndjson"))) {
+  // Accept a format option that matches the function being called, not only
+  // the JSONL spellings: read_csv(..., format='csv') and
+  // read_parquet(..., format='parquet') must not fail here.
+  const bool format_ok = o.format_.empty()
+      || (fmt == FILE_FORMAT_CSV && o.format_ == "csv")
+      || (fmt == FILE_FORMAT_PARQUET && o.format_ == "parquet")
+      || (fmt == FILE_FORMAT_JSONL
+          && (o.format_ == "newline_delimited" || o.format_ == "ndjson"
+              || o.format_ == "json" || o.format_ == "jsonl"))
+      || (fmt == FILE_FORMAT_GLOB && o.format_ == "glob");
+  if (!format_ok) {
     ret = OB_INVALID_ARGUMENT;
   } else if (fmt == FILE_FORMAT_GLOB) {
     ObFileTableColumn c; c.name_ = "file"; c.type_ = ObVarcharType; c.max_length_ = OB_MAX_FILE_NAME_LENGTH; cols.push_back(c);
@@ -358,6 +372,10 @@ int ObFileSqlUtils::infer_schema(ObFileTableFormat fmt, const ObFileTableOptions
     } else if (OB_FAIL(reader.open(o.path_))) {
     } else {
       ret = reader.get_schema(cols);
+      if (OB_SUCC(ret) && cols.size() > static_cast<size_t>(MAX_FILE_SQL_COLUMNS)) {
+        ret = OB_SIZE_OVERFLOW;
+        LOG_WARN("too many columns in Parquet file", K(ret), K(cols.size()));
+      }
     }
   } else if (OB_FAIL(get_file_snapshot(o.path_, snap))) {
   } else if (fmt == FILE_FORMAT_CSV) {
@@ -370,6 +388,10 @@ int ObFileSqlUtils::infer_schema(ObFileTableFormat fmt, const ObFileTableOptions
       for (size_t i = 0; i < row.size(); ++i) {
         ObFileTableColumn c; c.name_ = o.header_ ? row[i] : "column" + std::to_string(i + 1);
         if (c.name_.empty()) c.name_ = "column" + std::to_string(i + 1); cols.push_back(c);
+      }
+      if (cols.size() > static_cast<size_t>(MAX_FILE_SQL_COLUMNS)) {
+        ret = OB_SIZE_OVERFLOW;
+        LOG_WARN("too many columns in CSV file", K(ret), K(cols.size()));
       }
       std::set<std::string> names;
       for (size_t i = 0; i < cols.size(); ++i) {
@@ -385,6 +407,8 @@ int ObFileSqlUtils::infer_schema(ObFileTableFormat fmt, const ObFileTableOptions
         for (size_t i = 0; i < row.size(); ++i) if (!nulls[i]) {
           cols[i].type_ = widen_type(cols[i].type_, infer_scalar_type(row[i], false));
           cols[i].max_length_ = std::max(cols[i].max_length_, static_cast<int64_t>(row[i].size()));
+        } else if (i < cols.size()) {
+          cols[i].has_null_ = true;
         }
       }
       while (OB_SUCC(ret)) {
@@ -394,12 +418,14 @@ int ObFileSqlUtils::infer_schema(ObFileTableFormat fmt, const ObFileTableOptions
         for (size_t i = 0; i < row.size(); ++i) if (!nulls[i]) {
           cols[i].type_ = widen_type(cols[i].type_, infer_scalar_type(row[i], false));
           cols[i].max_length_ = std::max(cols[i].max_length_, static_cast<int64_t>(row[i].size()));
+        } else {
+          cols[i].has_null_ = true;
         }
       }
     }
   } else {
     std::ifstream in(o.path_.c_str(), std::ios::in | std::ios::binary); std::string line;
-    std::map<std::string, size_t> indexes; int64_t line_no = 0;
+    std::map<std::string, size_t> indexes; std::map<std::string, int64_t> first_seen; int64_t line_no = 0;
     if (!in.is_open()) ret = OB_FILE_NOT_EXIST;
     while (OB_SUCC(ret) && std::getline(in, line)) {
       ++line_no; if (!line.empty() && line.back() == '\r') line.pop_back(); if (line.empty()) continue;
@@ -409,7 +435,10 @@ int ObFileSqlUtils::infer_schema(ObFileTableFormat fmt, const ObFileTableOptions
         std::map<std::string,size_t>::iterator it = indexes.find(fields[i].first);
         if (it == indexes.end()) {
           if (cols.size() >= static_cast<size_t>(MAX_FILE_SQL_COLUMNS)) ret = OB_SIZE_OVERFLOW;
-          else { ObFileTableColumn c; c.name_ = fields[i].first; cols.push_back(c); indexes[c.name_] = cols.size() - 1; it = indexes.find(c.name_); }
+          else { ObFileTableColumn c; c.name_ = fields[i].first; cols.push_back(c); indexes[c.name_] = cols.size() - 1; first_seen[c.name_] = line_no; it = indexes.find(c.name_); }
+        }
+        if (OB_SUCC(ret) && fields[i].second.is_null_) {
+          cols[it->second].has_null_ = true;
         }
         if (OB_SUCC(ret) && !fields[i].second.is_null_) {
           ObFileTableColumn &c = cols[it->second];
@@ -417,8 +446,30 @@ int ObFileSqlUtils::infer_schema(ObFileTableFormat fmt, const ObFileTableOptions
           c.max_length_ = std::max(c.max_length_, static_cast<int64_t>(fields[i].second.value_.size()));
         }
       }
+      if (OB_SUCC(ret)) {
+        // Columns absent from this row are NULL for it.
+        for (size_t i = 0; i < cols.size(); ++i) {
+          bool present = false;
+          for (size_t j = 0; !present && j < fields.size(); ++j) present = (fields[j].first == cols[i].name_);
+          if (!present) cols[i].has_null_ = true;
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      // A column first seen after row 1 was missing in all earlier rows.
+      for (size_t i = 0; i < cols.size(); ++i) {
+        std::map<std::string, int64_t>::const_iterator it = first_seen.find(cols[i].name_);
+        if (it != first_seen.end() && it->second > 1) cols[i].has_null_ = true;
+      }
     }
     if (OB_SUCC(ret) && cols.empty()) ret = OB_INVALID_DATA;
+  }
+  if (OB_SUCC(ret)) {
+    // An all-NULL / all-missing column has no observed value to infer from;
+    // report it deterministically as VARCHAR instead of NULL type.
+    for (size_t i = 0; i < cols.size(); ++i) {
+      if (cols[i].type_ == ObNullType) cols[i].type_ = ObVarcharType;
+    }
   }
   return ret;
 }
@@ -503,6 +554,9 @@ int ObFileTableScanner::read_csv_record(std::vector<std::string> &row)
 int ObFileTableScanner::next_csv(std::vector<std::string> &v, std::vector<bool> &nulls)
 {
   int ret = read_csv_record(v);
+  if (OB_FAIL(ret) && OB_ITER_END != ret) {
+    LOG_WARN("invalid CSV row", K(ret), K(row_number_));
+  }
   if (OB_SUCC(ret) && options_.header_ && row_number_ == 1 && !columns_.empty()) ret = read_csv_record(v);
   if (OB_SUCC(ret)) {
     nulls.resize(v.size()); for (size_t i = 0; i < v.size(); ++i) nulls[i] = v[i] == options_.null_string_;

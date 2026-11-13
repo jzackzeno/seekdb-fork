@@ -43,10 +43,14 @@ struct ObFileTableOptions
 
 struct ObFileTableColumn
 {
-  ObFileTableColumn() : type_(common::ObNullType), max_length_(0) {}
+  ObFileTableColumn() : type_(common::ObNullType), max_length_(0), has_null_(false) {}
   std::string name_;
   common::ObObjType type_;
   int64_t max_length_;
+  // True if any inferred row was NULL / missing for this column. Needed by
+  // DESCRIBE SELECT, whose expected output marks day/created as YES and
+  // the other basic.csv columns as NO.
+  bool has_null_;
 };
 
 struct ObFileSnapshot

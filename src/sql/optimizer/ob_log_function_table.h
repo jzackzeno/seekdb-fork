@@ -39,6 +39,7 @@ public:
   int generate_access_exprs();
   ObIArray<ObRawExpr*> &get_access_exprs() { return access_exprs_; }
   virtual int get_op_exprs(ObIArray<ObRawExpr*> &all_exprs) override;
+  virtual int inner_replace_op_exprs(ObRawExprReplacer &replacer) override;
   virtual int is_my_fixed_expr(const ObRawExpr *expr, bool &is_fixed) override;
   virtual int allocate_expr_post(ObAllocExprContext &ctx) override;
   void set_table_id(uint64_t table_id) { table_id_ = table_id; }

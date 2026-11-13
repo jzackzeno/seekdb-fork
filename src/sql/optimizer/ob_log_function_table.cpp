@@ -32,6 +32,11 @@ int ObLogFunctionTable::generate_access_exprs()
   if (OB_ISNULL(stmt)) {
     ret = OB_ERR_UNEXPECTED;
   } else {
+    // get_op_exprs() (via allocate_expr_pre) may run more than once for the
+    // same operator. Clear first, otherwise the same column is pushed twice
+    // and the code generator later produces duplicate column_exprs_ /
+    // column_idxs_, which the file-table operator rejects with 4016.
+    access_exprs_.reset();
     for (int64_t i = 0; OB_SUCC(ret) && i < stmt->get_column_size(); ++i) {
       const ColumnItem *col_item = stmt->get_column_item(i);
       if (OB_ISNULL(col_item) || OB_ISNULL(col_item->expr_)) {
@@ -41,6 +46,22 @@ int ObLogFunctionTable::generate_access_exprs()
                  OB_FAIL(access_exprs_.push_back(col_item->expr_))) {
       } else { /*do nothing*/ }
     }
+  }
+  return ret;
+}
+
+int ObLogFunctionTable::inner_replace_op_exprs(ObRawExprReplacer &replacer)
+{
+  int ret = OB_SUCCESS;
+  // Mirror ObLogTableScan::inner_replace_op_exprs: Sort / Project may replace
+  // a column reference (e.g. the ORDER BY key, or a column inside REPLACE)
+  // with a new expression. The base implementation only replaces
+  // op_ordering / filter_exprs / output_exprs, so access_exprs_ would keep
+  // the stale pointer and the static code generator would then build
+  // column_exprs_ / column_idxs_ from it, disagreeing with the columns the
+  // runtime re-infers from the file (4016, file_sql_basic.test lines 30-33).
+  if (OB_FAIL(replace_exprs_action(replacer, access_exprs_))) {
+  } else if (NULL != value_expr_ && OB_FAIL(replace_expr_action(replacer, value_expr_))) {
   }
   return ret;
 }

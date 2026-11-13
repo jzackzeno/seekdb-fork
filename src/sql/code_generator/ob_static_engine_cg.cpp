@@ -5530,19 +5530,56 @@ int ObStaticEngineCG::generate_spec(ObLogFunctionTable &op, ObFunctionTableSpec 
       // that access list instead of walking every explicitly referenced
       // statement column: some of those can be pruned or replaced by upper
       // operators and therefore have no runtime frame.
+      // Defensive: after Sort / Project replacement an access entry may no
+      // longer be a plain column reference (e.g. a CAST around the ORDER BY
+      // key), may be duplicated if get_op_exprs() ran twice, or may belong
+      // to another table. The old code CK-failed on the first such entry
+      // (4016, file_sql_basic.test lines 30-33). Extract the underlying
+      // column references for this table instead, de-duplicated by column id,
+      // and skip entries that contribute no column of this table.
       ObIArray<ObRawExpr *> &access_exprs = op.get_access_exprs();
+      ObSEArray<int64_t, 8> seen_column_ids;
       for (int64_t i = 0; OB_SUCC(ret) && i < access_exprs.count(); ++i) {
         ObRawExpr *raw_expr = access_exprs.at(i);
-        ObExpr *rt_expr = nullptr;
         CK (OB_NOT_NULL(raw_expr));
-        CK (raw_expr->is_column_ref_expr());
-        if (OB_SUCC(ret)) {
+        if (!OB_SUCC(ret)) {
+        } else if (raw_expr->is_column_ref_expr()) {
           ObColumnRefRawExpr *column_expr = static_cast<ObColumnRefRawExpr *>(raw_expr);
-          CK (column_expr->get_table_id() == op.get_table_id());
-          OZ (mark_expr_self_produced(column_expr));
-          OZ (generate_rt_expr(*column_expr, rt_expr));
-          OZ (spec.column_exprs_.push_back(rt_expr));
-          OZ (spec.column_idxs_.push_back(column_expr->get_column_id() - OB_APP_MIN_COLUMN_ID));
+          if (column_expr->get_table_id() != op.get_table_id()) {
+            continue;
+          }
+          const int64_t column_id = column_expr->get_column_id();
+          bool seen = false;
+          for (int64_t j = 0; !seen && j < seen_column_ids.count(); ++j) {
+            seen = (seen_column_ids.at(j) == column_id);
+          }
+          if (!seen) {
+            ObExpr *rt_expr = nullptr;
+            OZ (seen_column_ids.push_back(column_id));
+            OZ (mark_expr_self_produced(column_expr));
+            OZ (generate_rt_expr(*column_expr, rt_expr));
+            OZ (spec.column_exprs_.push_back(rt_expr));
+            OZ (spec.column_idxs_.push_back(column_id - OB_APP_MIN_COLUMN_ID));
+          }
+        } else {
+          ObSEArray<ObRawExpr *, 4> extracted;
+          OZ (ObRawExprUtils::extract_column_exprs(raw_expr, op.get_table_id(), extracted));
+          for (int64_t j = 0; OB_SUCC(ret) && j < extracted.count(); ++j) {
+            ObColumnRefRawExpr *column_expr = static_cast<ObColumnRefRawExpr *>(extracted.at(j));
+            const int64_t column_id = column_expr->get_column_id();
+            bool seen = false;
+            for (int64_t k = 0; !seen && k < seen_column_ids.count(); ++k) {
+              seen = (seen_column_ids.at(k) == column_id);
+            }
+            if (!seen) {
+              ObExpr *rt_expr = nullptr;
+              OZ (seen_column_ids.push_back(column_id));
+              OZ (mark_expr_self_produced(column_expr));
+              OZ (generate_rt_expr(*column_expr, rt_expr));
+              OZ (spec.column_exprs_.push_back(rt_expr));
+              OZ (spec.column_idxs_.push_back(column_id - OB_APP_MIN_COLUMN_ID));
+            }
+          }
         }
       }
     } else {

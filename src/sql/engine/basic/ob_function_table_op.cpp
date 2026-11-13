@@ -314,9 +314,20 @@ int ObFunctionTableOp::inner_get_next_row_file()
     } else {
       const std::string &value = file_row_values_[file_idx];
       char *end = NULL;
-      switch (expr->datum_meta_.type_) {
-        case ObIntType: datum.set_int(std::strtoll(value.c_str(), &end, 10)); break;
-        case ObTinyIntType: datum.set_int(value == "true" || value == "1" ? 1 : 0); break;
+      // Convert by the *inferred* file type, not the runtime datum type:
+      // the expression engine may normalize BOOLEAN/TINYINT to INT, and
+      // strtoll("true") would then silently give 0 for every row
+      // (expected active = 1,0,1). Fall back to the runtime type only for
+      // all-NULL columns, whose inferred type is ObNullType.
+      const ObObjType value_type = file_columns_[file_idx].type_ == ObNullType
+          ? expr->datum_meta_.type_ : file_columns_[file_idx].type_;
+      switch (value_type) {
+        case ObIntType:
+          datum.set_int(value == "true" || value == "TRUE" ? 1
+              : value == "false" || value == "FALSE" ? 0
+              : std::strtoll(value.c_str(), &end, 10));
+          break;
+        case ObTinyIntType: datum.set_int(value == "true" || value == "TRUE" || value == "1" || value == "on" || value == "ON" ? 1 : 0); break;
         case ObDoubleType: datum.set_double(std::strtod(value.c_str(), &end)); break;
         case ObDateType: {
           int32_t days = 0; if (!ObFileSqlUtils::parse_date(value, days)) ret = OB_INVALID_DATA; else datum.set_date(days); break;
@@ -367,15 +378,26 @@ int ObFunctionTableOp::inner_get_next_batch(const int64_t max_row_cnt)
     if (file_idx < 0 || file_idx >= static_cast<int64_t>(file_columns_.size())) {
       ret = OB_ERR_UNEXPECTED;
     }
+    // See inner_get_next_row_file(): convert by the inferred file type,
+    // not the runtime datum type, so BOOLEAN "true"/"false" is not lost
+    // when the engine normalizes TINYINT to INT.
+    const ObObjType value_type = file_idx >= 0
+        && file_idx < static_cast<int64_t>(file_columns_.size())
+        && file_columns_[file_idx].type_ != ObNullType
+        ? file_columns_[file_idx].type_ : expr->datum_meta_.type_;
     for (size_t row = 0; OB_SUCC(ret) && row < file_batch_values_.size(); ++row) {
       if (file_batch_nulls_[row][file_idx]) {
         datums[row].set_null();
       } else {
         const std::string &value = file_batch_values_[row][file_idx];
         char *end = NULL;
-        switch (expr->datum_meta_.type_) {
-          case ObIntType: datums[row].set_int(std::strtoll(value.c_str(), &end, 10)); break;
-          case ObTinyIntType: datums[row].set_int(value == "true" || value == "1" ? 1 : 0); break;
+        switch (value_type) {
+          case ObIntType:
+            datums[row].set_int(value == "true" || value == "TRUE" ? 1
+                : value == "false" || value == "FALSE" ? 0
+                : std::strtoll(value.c_str(), &end, 10));
+            break;
+          case ObTinyIntType: datums[row].set_int(value == "true" || value == "TRUE" || value == "1" || value == "on" || value == "ON" ? 1 : 0); break;
           case ObDoubleType: datums[row].set_double(std::strtod(value.c_str(), &end)); break;
           case ObDateType: {
             int32_t days = 0;
