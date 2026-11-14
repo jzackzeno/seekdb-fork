@@ -107,6 +107,12 @@ int ObExplainResolver::resolve(const ParseNode &parse_tree)
             opt.with_tree_line_ = true;
             break;
           }
+          case T_DESCRIBE_SELECT: {
+            // DESCRIBE SELECT ... : return the result schema, not a plan.
+            explain_stmt->set_explain_format(EXPLAIN_DESCRIBE_SELECT);
+            opt.with_tree_line_ = true;
+            break;
+          }
           default:
             ret = OB_ERROR;
             LOG_WARN("unknown explain format", "format", format->type_);
