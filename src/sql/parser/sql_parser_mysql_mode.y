@@ -41,11 +41,10 @@
 #include "../../../src/sql/parser/sql_parser_base.h"
 
 #define GEN_EXPLAN_STMT(no_use, explain_stmt, explain_type, display_type, stmt, into_table, set_statement_id) \
+  (void)(no_use); \
   ParseNode *type_node = NULL; \
   ParseNode *display_node = NULL; \
-  if (NULL != (no_use) && T_DESCRIBE_SELECT == (no_use)->type_) { \
-    type_node = (no_use); \
-  } else if (0 != explain_type) { \
+  if (0 != explain_type) { \
     malloc_terminal_node(type_node, result->malloc_pool_, explain_type); \
   } \
   if (0 != display_type) { \
@@ -12479,8 +12478,8 @@ explain_or_desc relation_factor opt_desc_column_option
 
 explain_or_desc:
 EXPLAIN {$$ = NULL;}
-| DESCRIBE { malloc_terminal_node($$, result->malloc_pool_, T_DESCRIBE_SELECT); }
-| DESC  { malloc_terminal_node($$, result->malloc_pool_, T_DESCRIBE_SELECT); }
+| DESCRIBE {$$ = NULL;}
+| DESC  {$$ = NULL;}
 ;
 
 explainable_stmt:

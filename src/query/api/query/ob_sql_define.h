@@ -346,11 +346,7 @@ enum ExplainType
   EXPLAIN_PLANREGRESS,
   EXPLAIN_EXTENDED_NOADDR,
   EXPLAIN_HINT_FORMAT,
-  EXPLAIN_PLAN_TABLE,
-  // DuckDB-style DESCRIBE SELECT: return the result schema as
-  // (column_name, column_type, null, key, default, extra) rows instead
-  // of a Query Plan. Used by file_sql_basic.test for read_*() tables.
-  EXPLAIN_DESCRIBE_SELECT
+  EXPLAIN_PLAN_TABLE
 };
 
 enum DiagnosticsType

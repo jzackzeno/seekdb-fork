@@ -33,8 +33,6 @@ namespace sql
     virtual int generate_normal_raw_plan() override;
   private:
     int check_explain_generate_plan_with_outline(ObLogPlan *real_plan);
-    int build_describe_rows(const ObDMLStmt *child_stmt, ObLogValues &values_op);
-    int allocate_describe_output_exprs(ObLogValues &values_op);
     DISALLOW_COPY_AND_ASSIGN(ObExplainLogPlan);
   };
 }

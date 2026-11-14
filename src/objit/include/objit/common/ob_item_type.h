@@ -2279,7 +2279,6 @@ typedef enum ObItemType
   T_FORK_DATABASE = 4917,
   T_DIFF_TABLE = 4918,
   T_MERGE_TABLE = 4919,
-  T_DESCRIBE_SELECT = 4921, // DESCRIBE SELECT ... (file_sql): return result schema, not a plan
   T_MAX //Attention: add a new type before T_MAX
 } ObItemType;
 

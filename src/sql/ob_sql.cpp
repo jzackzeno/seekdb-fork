@@ -270,32 +270,6 @@ int ObSql::fill_result_set(ObResultSet &result_set,
       break;
     }
     case stmt::T_EXPLAIN: {
-      // DESCRIBE SELECT returns the result schema as six VARCHAR columns,
-      // not the single "Query Plan" column of a normal EXPLAIN.
-      if (EXPLAIN_DESCRIBE_SELECT
-          == static_cast<ObExplainStmt &>(basic_stmt).get_explain_type()) {
-        static const char *describe_col_names[6] = {
-          "column_name", "column_type", "null", "key", "default", "extra"};
-        ObString tname = ObString::make_string("explain_table");
-        field.tname_ = tname;
-        field.org_tname_ = tname;
-        field.type_.set_type(ObVarcharType);
-        field.charsetnr_ = CS_TYPE_UTF8MB4_GENERAL_CI;
-        field.type_.set_collation_type(CS_TYPE_UTF8MB4_GENERAL_CI);
-        field.type_.set_collation_level(CS_LEVEL_IMPLICIT);
-        field.type_.set_varchar(type_name);
-        if (OB_FAIL(result_set.reserve_field_columns(6))) {
-        } else {
-          for (int64_t i = 0; OB_SUCC(ret) && i < 6; ++i) {
-            ObString cname = ObString::make_string(describe_col_names[i]);
-            field.cname_ = cname;
-            field.org_cname_ = cname;
-            if (OB_FAIL(result_set.add_field_column(field))) {
-            }
-          }
-        }
-        break;
-      }
       ObString tname = ObString::make_string("explain_table");
       ObString cname = ObString::make_string("Query Plan");
       field.tname_ = tname;
