@@ -7712,6 +7712,14 @@ int ObDMLResolver::resolve_function_table_column_item_sys_func(const TableItem &
       } else if (NULL != (col_item = stmt->get_column_item(table_item.table_id_, column_name))) {
       } else if (OB_FAIL(resolve_function_table_column_item(table_item, meta, accuracy, column_name,
                                                             OB_APP_MIN_COLUMN_ID + i, col_item))) {
+      } else if (!columns[i].has_null_ && OB_NOT_NULL(col_item) && OB_NOT_NULL(col_item->expr_)) {
+        // The inferred schema saw no NULL for this column. Mark the column
+        // expression NOT NULL so DESCRIBE SELECT (is_not_null_for_read) and
+        // the optimizer report the correct nullability, e.g. day/created
+        // are YES and the other basic.csv columns are NO.
+        col_item->expr_->set_result_flag(NOT_NULL_FLAG);
+        if (OB_FAIL(col_items.push_back(*col_item))) {
+        }
       } else if (OB_FAIL(col_items.push_back(*col_item))) {
       }
     }

@@ -18,6 +18,8 @@
 #include "sql/optimizer/ob_explain_log_plan.h"
 #include "sql/optimizer/ob_log_values.h"
 #include "sql/code_generator/ob_code_generator.h"
+#include "sql/resolver/dml/ob_select_stmt.h"
+#include "sql/resolver/expr/ob_raw_expr_util.h"
 
 using namespace oceanbase;
 using namespace sql;
@@ -63,6 +65,12 @@ int ObExplainLogPlan::generate_normal_raw_plan()
       child_plan->get_optimizer_context().set_batch_size(batch_size);
       values_op = static_cast<ObLogValues*>(top);
       values_op->set_explain_plan(child_plan);
+      const bool is_describe = (EXPLAIN_DESCRIBE_SELECT == explain_stmt->get_explain_type());
+      if (is_describe) {
+        if (OB_FAIL(build_describe_rows(child_stmt, *values_op))) {
+          LOG_WARN("failed to build describe rows", K(ret));
+        }
+      } else {
       ObSqlPlan sql_plan(get_allocator());
       sql_plan.set_session_info(get_optimizer_context().get_session_info());
       ObExplainLogPlan *explain_plan = static_cast<ObExplainLogPlan*>(child_plan);
@@ -78,7 +86,7 @@ int ObExplainLogPlan::generate_normal_raw_plan()
                                                       plan_strs))) {
       } else {
         //For explain stmt, we can do pack at the stage of expr alloc,
-        //But we need to use the FALSE flag to tell the driver 
+        //But we need to use the FALSE flag to tell the driver
         //to use normal encoding instead of memcopy
         optimizer_context_.set_packed(false);
       }
@@ -91,6 +99,7 @@ int ObExplainLogPlan::generate_normal_raw_plan()
         if (OB_FAIL(values_op->add_row(row))) {
         }
       }
+      }
       if (OB_SUCC(ret)) {
         // set values_op operator id && set max operator id for LogPlan
         values_op->set_op_id(0);
@@ -99,11 +108,115 @@ int ObExplainLogPlan::generate_normal_raw_plan()
     }
     get_optimizer_context().get_all_exprs().reuse();
     if (OB_FAIL(ret)) {
-    } else if (OB_FAIL(allocate_output_expr_for_values_op(*values_op))) {
+    } else if (NULL == values_op) {
+      ret = OB_ERR_UNEXPECTED;
+    } else if (EXPLAIN_DESCRIBE_SELECT == explain_stmt->get_explain_type()
+               && OB_FAIL(allocate_describe_output_exprs(*values_op))) {
+    } else if (EXPLAIN_DESCRIBE_SELECT != explain_stmt->get_explain_type()
+               && OB_FAIL(allocate_output_expr_for_values_op(*values_op))) {
     } else {
       get_optimizer_context().set_plan_type(ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             ObPhyPlanType::OB_PHY_PLAN_LOCAL,
                                             false);
+    }
+  }
+  return ret;
+}
+
+static const char *describe_type_name(common::ObObjType type)
+{
+  switch (type) {
+    case common::ObIntType: return "BIGINT";
+    case common::ObUIntType: return "BIGINT";
+    case common::ObTinyIntType: return "BOOLEAN";
+    case common::ObDoubleType: return "DOUBLE";
+    case common::ObFloatType: return "DOUBLE";
+    case common::ObVarcharType: return "VARCHAR";
+    case common::ObDateType: return "DATE";
+    case common::ObDateTimeType: return "DATETIME";
+    case common::ObNullType: return "VARCHAR";
+    default: return "VARCHAR";
+  }
+}
+
+int ObExplainLogPlan::build_describe_rows(const ObDMLStmt *child_stmt, ObLogValues &values_op)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(child_stmt) || !child_stmt->is_select_stmt()) {
+    ret = OB_NOT_SUPPORTED;
+    LOG_USER_ERROR(OB_NOT_SUPPORTED, "DESCRIBE is only supported for SELECT");
+  } else {
+    // Nullability comes from the column expressions themselves: the resolver
+    // marks file-table columns NOT NULL when the inferred schema saw no NULL
+    // (has_null_ == false), so is_not_null_for_read() reports day/created
+    // as YES and the other basic.csv columns as NO. No file re-inference
+    // here, so this file needs no ob_file_sql_utils.h include.
+    const ObSelectStmt *select_stmt = static_cast<const ObSelectStmt *>(child_stmt);
+    const common::ObIArray<SelectItem> &select_items = select_stmt->get_select_items();
+    for (int64_t i = 0; OB_SUCC(ret) && i < select_items.count(); ++i) {
+      const SelectItem &item = select_items.at(i);
+      if (OB_ISNULL(item.expr_)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else {
+        ObString col_name = item.alias_name_;
+        char buf[128];
+        if (0 == col_name.length()) {
+          col_name = item.expr_name_;
+        }
+        if (0 == col_name.length()) {
+          int64_t pos = 0;
+          if (OB_SUCC(item.expr_->get_name(buf, sizeof(buf), pos))) {
+            col_name.assign_ptr(buf, static_cast<int32_t>(pos));
+          }
+        }
+        const char *type_str = describe_type_name(item.expr_->get_result_type().get_type());
+        ObObj cells[6];
+        cells[0].set_varchar(col_name);
+        cells[1].set_varchar(ObString::make_string(type_str));
+        cells[2].set_varchar(ObString(item.expr_->is_not_null_for_read() ? 2 : 3,
+                                      item.expr_->is_not_null_for_read() ? "NO" : "YES"));
+        cells[3].set_null();
+        cells[4].set_null();
+        cells[5].set_null();
+        ObNewRow row;
+        row.cells_ = cells;
+        row.count_ = 6;
+        if (OB_FAIL(values_op.add_row(row))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+int ObExplainLogPlan::allocate_describe_output_exprs(ObLogValues &values_op)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(optimizer_context_.get_session_info())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    // Six VARCHAR output columns: column_name, column_type, null, key,
+    // default, extra. Mirrors ObLogPlan::allocate_output_expr_for_values_op
+    // (single column) but with one const expr per describe column, so the
+    // Values operator emits 6 cells per row.
+    for (int64_t i = 0; OB_SUCC(ret) && i < 6; ++i) {
+      ObConstRawExpr *output = NULL;
+      if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
+      } else {
+        ObObj v;
+        v.set_varchar(" ");
+        v.set_collation_type(ObCharset::get_system_collation());
+        output->set_value(v);
+        if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
+        } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
+        } else if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
+        }
+      }
+    }
+    if (OB_SUCC(ret)) {
+      values_op.set_branch_id(0);
+      values_op.set_id(0);
+      values_op.set_op_id(0);
     }
   }
   return ret;
