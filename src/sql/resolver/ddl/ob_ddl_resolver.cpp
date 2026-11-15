@@ -31,6 +31,8 @@
 #include "query/ddl/ob_dynamic_partition_policy.h"
 #include "share/rc/ob_server_runtime.h"
 #include "share/schema/ob_table_schema.h"
+#include "share/schema/ob_ai_model_mgr.h"
+#include "share/ai_service/ob_ai_model_info.h"
 #include "sql/engine/expr/ob_obj_cast_runtime.h"
 
 namespace oceanbase
@@ -1762,6 +1764,502 @@ int ObDDLResolver::resolve_column_name(ObColumnSchemaV2 &column,
   return ret;
 }
 
+// Parse one AI function call string:
+//   AI_COMPLETE('model', <prompt>)
+//   AI_EMBED('model', <prompt>[, <dim>])
+// The prompt text is extracted by scanning the call, tracking nested
+// parentheses and quoted strings, so it works for arbitrary prompt
+// expressions (e.g. concat('...', col)).
+static int parse_ai_func_call_str(const ObString &call_str,
+                                  ObString &func_name,
+                                  ObString &model_name,
+                                  ObString &prompt_expr,
+                                  int64_t &embed_dim,
+                                  bool &has_dim)
+{
+  int ret = OB_SUCCESS;
+  embed_dim = -1;
+  has_dim = false;
+  const char *str = call_str.ptr();
+  const int64_t len = call_str.length();
+  int64_t lparen = -1;
+  for (int64_t i = 0; OB_SUCC(ret) && i < len && lparen < 0; ++i) {
+    if ('(' == str[i]) {
+      lparen = i;
+    }
+  }
+  if (OB_SUCC(ret) && lparen <= 0) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai func call, no lparen", K(ret), K(call_str));
+  }
+  int64_t pos = 0;
+  if (OB_SUCC(ret)) {
+    // func name: trim trailing blanks before '('
+    int64_t name_end = lparen;
+    while (name_end > 0 && ' ' == str[name_end - 1]) {
+      --name_end;
+    }
+    func_name.assign_ptr(str, static_cast<int32_t>(name_end));
+    pos = lparen + 1;
+    while (pos < len && ' ' == str[pos]) {
+      ++pos;
+    }
+    // model name must be a quoted string literal
+    if (pos >= len || '\'' != str[pos]) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "ai func model name must be a string literal", K(ret), K(call_str));
+    } else {
+      const int64_t start = pos + 1;
+      int64_t end = -1;
+      for (int64_t i = start; i < len && end < 0; ++i) {
+        if ('\'' == str[i]) {
+          if (i + 1 < len && '\'' == str[i + 1]) {
+            ++i;  // '' escaped quote
+          } else {
+            end = i;
+          }
+        }
+      }
+      if (end < 0) {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "unterminated model name in ai func call", K(ret), K(call_str));
+      } else {
+        model_name.assign_ptr(str + start, static_cast<int32_t>(end - start));
+        pos = end + 1;
+        while (pos < len && ' ' == str[pos]) {
+          ++pos;
+        }
+        if (pos >= len || ',' != str[pos]) {
+          ret = OB_ERR_UNEXPECTED;
+          SQL_RESV_LOG(WARN, "expect comma after model name in ai func call", K(ret), K(call_str));
+        } else {
+          ++pos;
+          // prompt: from here to the matching ')' or a top-level ','
+          const int64_t prompt_start = pos;
+          int64_t prompt_end = -1;
+          int64_t dim_start = -1;
+          int64_t depth = 0;
+          bool in_str = false;
+          for (int64_t i = pos; i < len && prompt_end < 0; ++i) {
+            const char c = str[i];
+            if (in_str) {
+              if ('\'' == c) {
+                if (i + 1 < len && '\'' == str[i + 1]) {
+                  ++i;
+                } else {
+                  in_str = false;
+                }
+              }
+            } else if ('\'' == c) {
+              in_str = true;
+            } else if ('(' == c) {
+              ++depth;
+            } else if (')' == c) {
+              if (0 == depth) {
+                prompt_end = i;
+              } else {
+                --depth;
+              }
+            } else if (',' == c && 0 == depth) {
+              prompt_end = i;
+              dim_start = i + 1;
+            }
+          }
+          if (prompt_end < 0) {
+            ret = OB_ERR_UNEXPECTED;
+            SQL_RESV_LOG(WARN, "cannot find prompt end in ai func call", K(ret), K(call_str));
+          } else {
+            int64_t p_start = prompt_start;
+            int64_t p_end = prompt_end;
+            while (p_end > p_start && ' ' == str[p_end - 1]) {
+              --p_end;
+            }
+            while (p_start < p_end && ' ' == str[p_start]) {
+              ++p_start;
+            }
+            if (p_end <= p_start) {
+              ret = OB_ERR_UNEXPECTED;
+              SQL_RESV_LOG(WARN, "empty prompt in ai func call", K(ret), K(call_str));
+            } else {
+              prompt_expr.assign_ptr(str + p_start, static_cast<int32_t>(p_end - p_start));
+            }
+            if (OB_SUCC(ret) && dim_start >= 0) {
+              int64_t d_start = dim_start;
+              while (d_start < len && ' ' == str[d_start]) {
+                ++d_start;
+              }
+              int64_t d_end = d_start;
+              while (d_end < len && str[d_end] >= '0' && str[d_end] <= '9') {
+                ++d_end;
+              }
+              if (d_end <= d_start) {
+                ret = OB_ERR_UNEXPECTED;
+                SQL_RESV_LOG(WARN, "invalid dim in ai func call", K(ret), K(call_str));
+              } else {
+                int64_t dim_val = 0;
+                for (int64_t i = d_start; i < d_end; ++i) {
+                  dim_val = dim_val * 10 + (str[i] - '0');
+                }
+                embed_dim = dim_val;
+                has_dim = true;
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+// Parse one (name, value) AI column option pair. The value is a T_NUMBER
+// (integer), a STRING_VALUE, or a relation_name node.
+static int parse_ai_column_single_option(ParseNode *pair_node, AiColumnDef &ai_def)
+{
+  int ret = OB_SUCCESS;
+  if (OB_ISNULL(pair_node) || T_LINK_NODE != pair_node->type_
+      || 2 != pair_node->num_child_
+      || OB_ISNULL(pair_node->children_[0]) || OB_ISNULL(pair_node->children_[1])) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column option pair", K(ret), KP(pair_node));
+  } else {
+    ParseNode *name_node = pair_node->children_[0];
+    ParseNode *value_node = pair_node->children_[1];
+    ObString name;
+    ObString value_str;
+    int64_t value_int = 0;
+    bool value_is_int = false;
+    if (OB_ISNULL(name_node->str_value_) || 0 == name_node->str_len_) {
+      ret = OB_ERR_UNEXPECTED;
+      SQL_RESV_LOG(WARN, "ai column option name is empty", K(ret));
+    } else {
+      name.assign_ptr(name_node->str_value_, name_node->str_len_);
+    }
+    if (OB_SUCC(ret)) {
+      if (T_NUMBER == value_node->type_) {
+        value_int = value_node->value_;
+        value_is_int = true;
+      } else if (NULL != value_node->str_value_ && value_node->str_len_ > 0) {
+        value_str.assign_ptr(value_node->str_value_, value_node->str_len_);
+      } else {
+        ret = OB_ERR_UNEXPECTED;
+        SQL_RESV_LOG(WARN, "ai column option value is empty", K(ret), K(name));
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (0 == name.case_compare("sync_mode")) {
+        if (value_is_int) {
+          ret = OB_INVALID_ARGUMENT;
+          SQL_RESV_LOG(WARN, "sync_mode must be a string", K(ret), K(name));
+        } else {
+          ai_def.sync_mode_ = value_str;
+        }
+      } else if (0 == name.case_compare("max_retries")) {
+        if (!value_is_int) {
+          ret = OB_INVALID_ARGUMENT;
+          SQL_RESV_LOG(WARN, "max_retries must be an integer", K(ret), K(name));
+        } else {
+          ai_def.max_retries_ = value_int;
+        }
+      } else if (0 == name.case_compare("timeout_ms")) {
+        if (!value_is_int) {
+          ret = OB_INVALID_ARGUMENT;
+          SQL_RESV_LOG(WARN, "timeout_ms must be an integer", K(ret), K(name));
+        } else {
+          ai_def.timeout_ms_ = value_int;
+        }
+      } else if (0 == name.case_compare("retry_delay_ms")) {
+        if (!value_is_int) {
+          ret = OB_INVALID_ARGUMENT;
+          SQL_RESV_LOG(WARN, "retry_delay_ms must be an integer", K(ret), K(name));
+        } else {
+          ai_def.retry_delay_ms_ = value_int;
+        }
+      } else {
+        ret = OB_INVALID_ARGUMENT;
+        SQL_RESV_LOG(WARN, "unknown ai column option", K(ret), K(name));
+      }
+    }
+  }
+  return ret;
+}
+
+// Walk the T_LINK_NODE chain of AI column options. A chain node has a
+// T_LINK_NODE left child; a leaf pair node has a relation_name left child.
+static int parse_ai_column_option_chain(ParseNode *node, AiColumnDef &ai_def)
+{
+  int ret = OB_SUCCESS;
+  if (NULL == node) {
+    // empty
+  } else if (T_LINK_NODE != node->type_ || 2 != node->num_child_
+             || OB_ISNULL(node->children_[0]) || OB_ISNULL(node->children_[1])) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column options chain", K(ret), KP(node));
+  } else if (T_LINK_NODE == node->children_[0]->type_) {
+    if (OB_FAIL(parse_ai_column_option_chain(node->children_[0], ai_def))) {
+    } else if (OB_FAIL(parse_ai_column_single_option(node->children_[1], ai_def))) {
+    }
+  } else if (OB_FAIL(parse_ai_column_single_option(node, ai_def))) {
+  }
+  return ret;
+}
+
+// Parse the WITH (...) options of an AI COLUMN definition. The options node
+// is a T_AI_COLUMN_OPTIONS wrapping a T_LINK_NODE chain of (name, value)
+// pairs.
+static int parse_ai_column_options(ParseNode *options_node, AiColumnDef &ai_def)
+{
+  int ret = OB_SUCCESS;
+  if (NULL == options_node) {
+    // no WITH clause: defaults apply
+  } else if (T_AI_COLUMN_OPTIONS != options_node->type_
+             || OB_ISNULL(options_node->children_)
+             || OB_ISNULL(options_node->children_[0])) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column options node", K(ret), K(options_node->type_));
+  } else if (OB_FAIL(parse_ai_column_option_chain(options_node->children_[0], ai_def))) {
+  }
+  return ret;
+}
+
+int ObDDLResolver::parse_ai_column_definition(
+    ParseNode *node,
+    const ObColumnSchemaV2 &column,
+    const ObTableSchema &table_schema,
+    AiColumnDef &ai_def)
+{
+  int ret = OB_SUCCESS;
+  ai_def.reset();
+  if (OB_ISNULL(node) || T_COLUMN_DEFINITION != node->type_
+      || GEN_COLUMN_DEFINITION_NUM_CHILD != node->num_child_
+      || OB_ISNULL(node->children_[3]) || OB_ISNULL(node->children_[6])
+      || T_AI_COLUMN != node->children_[6]->type_
+      || OB_ISNULL(allocator_)) {
+    ret = OB_ERR_UNEXPECTED;
+    SQL_RESV_LOG(WARN, "invalid ai column definition node", K(ret), KP(node));
+  } else {
+    ObString call_str(node->children_[3]->str_len_, node->children_[3]->str_value_);
+    ObString func_name;
+    ObString model_name;
+    ObString prompt_expr;
+    int64_t embed_dim = -1;
+    bool has_dim = false;
+    if (OB_FAIL(parse_ai_func_call_str(call_str, func_name, model_name,
+                                       prompt_expr, embed_dim, has_dim))) {
+    } else if (OB_FAIL(parse_ai_column_options(node->children_[4], ai_def))) {
+    } else if (0 == func_name.case_compare("AI_COMPLETE")) {
+      ai_def.func_type_ = 0;
+    } else if (0 == func_name.case_compare("AI_EMBED")) {
+      ai_def.func_type_ = 1;
+    } else {
+      ret = OB_INVALID_ARGUMENT;
+      SQL_RESV_LOG(WARN, "ai column function must be AI_COMPLETE or AI_EMBED",
+                   K(ret), K(func_name));
+    }
+    if (OB_SUCC(ret)) {
+      ai_def.model_name_ = model_name;
+      ai_def.prompt_expr_ = prompt_expr;
+      ai_def.embed_dim_ = embed_dim;
+      ai_def.is_ai_column_ = true;
+      if (ai_def.sync_mode_.empty()) {
+        ai_def.sync_mode_ = ObString::make_string("async");
+      }
+      // The prompt must not reference another AI column (no chaining).
+      ObItemType root_expr_type = T_INVALID;
+      if (OB_FAIL(ObResolverUtils::resolve_generated_column_info(
+              prompt_expr, *allocator_, root_expr_type, ai_def.depends_on_))) {
+        SQL_RESV_LOG(WARN, "fail to resolve ai column dependencies", K(ret), K(prompt_expr));
+      } else {
+        for (int64_t i = 0; OB_SUCC(ret) && i < ai_def.depends_on_.count(); ++i) {
+          const ObString &dep_name = ai_def.depends_on_.at(i);
+          const ObColumnSchemaV2 *dep_col = table_schema.get_column_schema(dep_name);
+          if (NULL != dep_col && dep_col->is_ai_column()) {
+            ret = OB_NOT_SUPPORTED;
+            LOG_USER_ERROR(OB_NOT_SUPPORTED, "AI column depending on another AI column");
+            SQL_RESV_LOG(WARN, "ai column cannot depend on another ai column",
+                         K(ret), K(dep_name));
+          }
+        }
+      }
+    }
+    // Validate the model exists and its type matches the AI function.
+    if (OB_SUCC(ret)) {
+      const share::schema::ObAiModelSchema *model_schema = NULL;
+      if (OB_ISNULL(schema_checker_) || OB_ISNULL(schema_checker_->get_schema_guard())) {
+        // No schema guard available: skip model validation.
+      } else if (OB_FAIL(schema_checker_->get_schema_guard()->get_ai_model_schema(
+                     model_name, model_schema))) {
+        SQL_RESV_LOG(WARN, "fail to get ai model schema", K(ret), K(model_name));
+      } else if (OB_ISNULL(model_schema)) {
+        ret = OB_AI_FUNC_MODEL_NOT_FOUND;
+        LOG_USER_ERROR(OB_AI_FUNC_MODEL_NOT_FOUND, model_name.length(), model_name.ptr());
+      } else {
+        const EndpointType::TYPE expect_type =
+            (0 == ai_def.func_type_) ? EndpointType::COMPLETION
+                                     : EndpointType::DENSE_EMBEDDING;
+        if (model_schema->get_type() != expect_type) {
+          ret = OB_INVALID_ARGUMENT;
+          SQL_RESV_LOG(WARN, "ai model type does not match ai function",
+                       K(ret), K(model_name), K(model_schema->get_type()));
+        }
+      }
+    }
+    // Embedding dimension must match the VECTOR(n) column dimension.
+    if (OB_SUCC(ret) && 1 == ai_def.func_type_) {
+      if (!column.is_collection()) {
+        ret = OB_INVALID_ARGUMENT;
+        SQL_RESV_LOG(WARN, "AI_EMBED result column must be VECTOR", K(ret));
+      } else if (has_dim) {
+        const int64_t col_dim = column.get_accuracy().get_length();
+        if (col_dim != embed_dim) {
+          ret = OB_ERR_INVALID_VECTOR_DIM;
+          LOG_USER_ERROR(OB_ERR_INVALID_VECTOR_DIM,
+                         static_cast<uint32_t>(col_dim),
+                         static_cast<uint32_t>(embed_dim));
+        }
+      }
+    }
+    // Result-type hint, persisted in normalized_expr for the worker.
+    if (OB_SUCC(ret)) {
+      ObString hint;
+      if (column.is_json()) {
+        hint = ObString::make_string("Return exactly one valid JSON value");
+      } else if (column.get_meta_type().is_integer_type()) {
+        hint = ObString::make_string("Return exactly one base-10 integer");
+      }
+      if (OB_FAIL(ob_write_string(*allocator_, hint, ai_def.result_hint_))) {
+      } else if (!hint.empty()) {
+        ObSqlString norm;
+        if (OB_FAIL(norm.append(call_str))) {
+        } else if (OB_FAIL(norm.append(" "))) {
+        } else if (OB_FAIL(norm.append(hint))) {
+        } else if (OB_FAIL(ob_write_string(*allocator_, norm.string(), ai_def.normalized_expr_))) {
+        }
+      } else if (OB_FAIL(ob_write_string(*allocator_, call_str, ai_def.normalized_expr_))) {
+      }
+      if (OB_SUCC(ret) && OB_FAIL(ob_write_string(*allocator_, prompt_expr, ai_def.prompt_expr_))) {
+      }
+      if (OB_SUCC(ret) && OB_FAIL(ob_write_string(*allocator_, model_name, ai_def.model_name_))) {
+      }
+      if (OB_SUCC(ret) && OB_FAIL(ob_write_string(*allocator_, ai_def.sync_mode_, ai_def.sync_mode_))) {
+      }
+    }
+  }
+  return ret;
+}
+
+int ObDDLResolver::fill_ai_dependency_column_ids(const ObTableSchema &table_schema,
+                                                 AiColumnDef &ai_def)
+{
+  int ret = OB_SUCCESS;
+  ObSqlString id_list;
+  bool first = true;
+  for (int64_t i = 0; OB_SUCC(ret) && i < ai_def.depends_on_.count(); ++i) {
+    const ObColumnSchemaV2 *dep_col = table_schema.get_column_schema(ai_def.depends_on_.at(i));
+    if (OB_ISNULL(dep_col)) {
+      // Not resolvable against this schema snapshot; the caller refills the
+      // list once the schema is complete.
+      continue;
+    } else if (OB_FAIL(id_list.append_fmt("%s%ld", first ? "" : ",",
+                                          static_cast<int64_t>(dep_col->get_column_id())))) {
+    } else {
+      first = false;
+    }
+  }
+  if (OB_SUCC(ret) && OB_FAIL(ob_write_string(*allocator_, id_list.string(),
+                                              ai_def.dependency_column_ids_))) {
+  }
+  return ret;
+}
+
+int ObDDLResolver::build_ai_column_hidden_columns(
+    const ObColumnSchemaV2 &ai_column,
+    const AiColumnDef &ai_def,
+    ObIAllocator &allocator,
+    ObColumnSchemaV2 &state_column,
+    ObColumnSchemaV2 &request_column,
+    ObColumnSchemaV2 &result_spec_column)
+{
+  int ret = OB_SUCCESS;
+  UNUSED(ai_def);
+  const ObString &ai_name = ai_column.get_column_name_str();
+  // Hidden column names: __ai_<ai_col>__state / __ai_<ai_col>__request /
+  // __ai_<ai_col>__result_spec (truncated to OB_MAX_COLUMN_NAME_LENGTH).
+  const char *suffixes[3] = {"__state", "__request", "__result_spec"};
+  ObColumnSchemaV2 *cols[3] = {&state_column, &request_column, &result_spec_column};
+  for (int64_t i = 0; OB_SUCC(ret) && i < 3; ++i) {
+    ObColumnSchemaV2 &col = *cols[i];
+    col.reset();
+    col.set_table_id(ai_column.get_table_id());
+    col.set_is_hidden(true);
+    col.set_nullable(true);
+    col.set_rowkey_position(0);
+    col.set_index_position(0);
+    col.set_tbl_part_key_pos(0);
+    col.set_prev_column_id(UINT64_MAX);
+    col.set_next_column_id(UINT64_MAX);
+    col.set_charset_type(CHARSET_UTF8MB4);
+    col.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+    // Build the name.
+    ObSqlString name_buf;
+    if (OB_FAIL(name_buf.append("__ai_"))) {
+    } else if (OB_FAIL(name_buf.append(ai_name))) {
+    } else if (OB_FAIL(name_buf.append(suffixes[i]))) {
+    } else {
+      ObString full_name = name_buf.string();
+      if (full_name.length() > OB_MAX_COLUMN_NAME_LENGTH) {
+        // Truncate the AI column name part, keeping prefix and suffix.
+        const int64_t suffix_len = static_cast<int64_t>(strlen(suffixes[i]));
+        const int64_t keep = OB_MAX_COLUMN_NAME_LENGTH - 5 - suffix_len;
+        ObSqlString trunc_buf;
+        if (OB_FAIL(trunc_buf.append("__ai_"))) {
+        } else if (OB_FAIL(trunc_buf.append(ai_name.ptr(), keep))) {
+        } else if (OB_FAIL(trunc_buf.append(suffixes[i]))) {
+        } else {
+          full_name = trunc_buf.string();
+        }
+      }
+      if (OB_SUCC(ret) && OB_FAIL(col.set_column_name(full_name))) {
+      }
+    }
+    if (OB_SUCC(ret)) {
+      if (0 == i) {
+        // state: VARCHAR(16) holding 'PENDING' / 'READY' / 'FAILED'
+        col.set_data_type(ObVarcharType);
+        col.set_data_length(16);
+        ObObj default_value;
+        default_value.set_varchar(ObString::make_string("PENDING"));
+        default_value.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+        default_value.set_collation_level(CS_LEVEL_COERCIBLE);
+        if (OB_FAIL(col.set_orig_default_value(default_value))) {
+        } else if (OB_FAIL(col.set_cur_default_value(default_value, false))) {
+        }
+      } else if (1 == i) {
+        // request: BIGINT holding the current request_id
+        col.set_data_type(ObIntType);
+        col.set_data_length(sizeof(int64_t));
+      } else {
+        // result_spec: VARCHAR(256) holding the result-type hint
+        col.set_data_type(ObVarcharType);
+        col.set_data_length(256);
+        if (!ai_def.result_hint_.empty()) {
+          // Store the result-type hint as the default so the worker can
+          // read it back without joining the metadata table.
+          ObObj default_value;
+          default_value.set_varchar(ai_def.result_hint_);
+          default_value.set_collation_type(CS_TYPE_UTF8MB4_BIN);
+          default_value.set_collation_level(CS_LEVEL_COERCIBLE);
+          if (OB_FAIL(col.set_orig_default_value(default_value))) {
+          } else if (OB_FAIL(col.set_cur_default_value(default_value, false))) {
+          }
+        }
+      }
+    }
+  }
+  UNUSED(allocator);
+  return ret;
+}
+
 int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
                                              ParseNode *node, /* column_definition */
                                              ObColumnResolveStat &resolve_stat,
@@ -1770,7 +2268,8 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
                                              const ObTableSchema &table_schema,
                                              const bool unused_flag,
                                              const bool is_create_table_as,
-                                             const bool allow_has_default)
+                                             const bool allow_has_default,
+                                             AiColumnDef *ai_def_out)
 {
   int ret = OB_SUCCESS;
   bool is_modify_column = stmt::T_ALTER_TABLE == stmt_->get_stmt_type()
@@ -1877,6 +2376,8 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
   }
   if (OB_SUCC(ret) && GEN_COLUMN_DEFINITION_NUM_CHILD == node->num_child_) {
     ParseNode *expr_node = NULL;
+    const bool is_ai_column = (NULL != node->children_[6]
+                               && T_AI_COLUMN == node->children_[6]->type_);
     if (OB_ISNULL(expr_node = node->children_[3])) {
       ret = OB_ERR_UNEXPECTED;
     } else {
@@ -1898,13 +2399,26 @@ int ObDDLResolver::resolve_column_definition(ObColumnSchemaV2 &column,
         if (OB_FAIL(column.set_cur_default_value(
                 default_value,
                 column.is_default_expr_v2_column()))) {
+        } else if (is_ai_column) {
+          // AI column: validate the AI function call and WITH options. The
+          // AI call text is kept in cur_default_value_ like a generated
+          // column expression, but no generated-column flag is set.
+          AiColumnDef ai_def;
+          if (OB_FAIL(parse_ai_column_definition(node, column, table_schema, ai_def))) {
+          } else {
+            column.set_is_ai_column(true);
+            if (NULL != ai_def_out) {
+              *ai_def_out = ai_def;
+            }
+          }
         } else if (node->children_[4] != NULL && node->children_[4]->type_ == T_STORED_COLUMN) {
           column.add_column_flag(STORED_GENERATED_COLUMN_FLAG);
         } else {
           column.add_column_flag(VIRTUAL_GENERATED_COLUMN_FLAG);
         }
       }
-      if (OB_SUCC(ret) && is_pad_char_to_full_length(session_info_->get_sql_mode())) {
+      if (OB_SUCC(ret) && !is_ai_column
+          && is_pad_char_to_full_length(session_info_->get_sql_mode())) {
         column.add_column_flag(PAD_WHEN_CALC_GENERATED_COLUMN_FLAG);
       }
     }
@@ -3716,6 +4230,10 @@ int ObDDLResolver::check_default_value(ObObj &default_value,
   const ObObj input_default_value = default_value;
   if (OB_ISNULL(session_info)) {
     ret = OB_ERR_UNEXPECTED;
+  } else if (column.is_ai_column()) {
+    // AI column: cur_default_value_ holds the AI function call text, not a
+    // real default value. There is nothing to validate or cast here; the
+    // call was already validated by parse_ai_column_definition.
   } else if (column.is_generated_column()) {
     ObString expr_str;
     ObRawExpr *expr = NULL;

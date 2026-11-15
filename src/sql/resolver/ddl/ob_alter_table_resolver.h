@@ -67,6 +67,11 @@ public:
   int resolve_convert_to_character(const ParseNode &node);
   int resolve_foreign_key_options(const ParseNode &node);
   int resolve_add_column(const ParseNode &node, ObColumnNameSet &resolve_add_column);
+  // ALTER TABLE t RETRY AI COLUMN col [WHERE ...]: validates that the
+  // target is an AI column, prints the WHERE clause back to SQL text
+  // (rewriting the bare STATUS pseudo-column to the AI column's state
+  // hidden column) and records it on the stmt for local execution.
+  int resolve_retry_ai_column(const ParseNode &node);
   int resolve_alter_column(const ParseNode &node);
   int resolve_change_column(const ParseNode &node);
   int check_modify_column_allowed(const share::schema::AlterColumnSchema &alter_column_schema,
@@ -130,7 +135,10 @@ private:
                                             bool &is_modify_column_visibility,
                                             ObIArray<ObColumnSchemaV2 *> &resolved_cols,
                                             const bool unused_flag = false,
-                                            const bool allow_has_default = true);
+                                            const bool allow_has_default = true,
+                                            // Returned when the column is an
+                                            // AI column; NULL when not needed.
+                                            AiColumnDef *ai_def_out = NULL);
   int resolve_alter_column_not_null(share::schema::AlterColumnSchema &column,
                                      const ObColumnSchemaV2 &ori_column);
   int get_table_schema_all_column_schema(ObIArray<ObColumnSchemaV2 *> &resolved_cols,

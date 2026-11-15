@@ -30,6 +30,7 @@ struct ObPartition;
 struct ObSubPartition;
 struct ObBasePartition;
 class ObMultiVersionSchemaService;
+class ObTableSchema;
 }
 }
 namespace obcall
@@ -51,6 +52,7 @@ class ObExecContext;
 class ObRawExpr;
 class ObCreateTableStmt;
 class ObTableStmt;
+struct AiColumnDef;
 
 class ObDDLExecutorUtil final
 {
@@ -84,6 +86,24 @@ public:
                                   query::ObIRootCommandService &root_commands,
                                   const char* parallel_ddl_type,
                                   const obcall::ObCreateTableArg &arg, obcall::ObCreateTableRes &res);
+  // Persist AI column metadata into oceanbase.__all_ai_column after the
+  // CREATE/ALTER TABLE RPC succeeded. When table_schema is given, the
+  // column ids are resolved from it by column name (ALTER path: rootserver
+  // assigns the ids); otherwise the ids stored in ai_defs are used
+  // (CREATE path: the resolver assigned them).
+  static int write_ai_column_meta(common::ObMySQLProxy &sql_proxy,
+                                  const uint64_t table_id,
+                                  const common::ObIArray<AiColumnDef> &ai_defs,
+                                  const share::schema::ObTableSchema *table_schema = NULL);
+  // Execute ALTER TABLE t RETRY AI COLUMN col [WHERE ...] locally: for
+  // every row matching the (resolver-printed) WHERE clause, invalidate
+  // the AI column (NULL + state PENDING + new request id) and create a
+  // new AI column task. The row selection and all writes run in one
+  // transaction, so a rollback leaves no stale task behind.
+  static int retry_ai_column(common::ObMySQLProxy &sql_proxy,
+                             const uint64_t table_id,
+                             const common::ObString &ai_column_name,
+                             const common::ObString &where_sql);
 private:
   static bool is_server_stopped(query::ObIQueryRuntimeEnvironment &runtime_environment);
 private:
