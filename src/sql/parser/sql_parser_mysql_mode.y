@@ -333,7 +333,7 @@ END_P SET_VAR DELIMITER
         QUANTIFIER_TABLE QUARTER QUERY QUEUE_TIME QUICK
 
         RECOVER REDUNDANT REFRESH RELAY RELAYLOG RELAY_LOG_FILE RELAY_LOG_POS RELAY_THREAD RELOAD REMOVE
-        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETURNED_SQLSTATE RETURNS RETURNING REVERSE
+        REPEATABLE RESET RESPECT RESTART RESTORE RESUME RETRY RETURNED_SQLSTATE RETURNS RETURNING REVERSE
         REWRITE ROLLBACK ROLLUP ROUTINE ROW ROWID ROW_COUNT ROW_FORMAT ROWS RTREE
         RUN RECYCLEBIN REPLICATION ROTATE ROW_NUMBER RUDUNDANT RECURSIVE RANDOM REDO_TRANSPORT_OPTIONS
         RANK READ_ONLY RECOVERY REJECT ROLE
@@ -497,6 +497,7 @@ END_P SET_VAR DELIMITER
 %type <node> dynamic_sampling_hint
 %type <node> skip_index_type opt_skip_index_type_list
 %type <node> vec_index_params vec_index_param vec_index_param_value opt_with_vector_index_parameters
+%type <node> opt_ai_column_with ai_column_options ai_column_option ai_column_option_value
 %type <node> json_table_expr unnest_expr mock_jt_on_error_on_empty jt_column_list json_table_column_def
 %type <node> json_table_ordinality_column_def json_table_exists_column_def json_table_value_column_def json_table_nested_column_def
 %type <node> opt_value_on_empty_or_error_or_mismatch opt_on_mismatch
@@ -4849,6 +4850,16 @@ column_definition_ref data_type opt_column_attribute_list opt_column_reference o
   merge_nodes(attributes, result, T_COLUMN_ATTRIBUTES, $10);
   malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 7, $1, $2, attributes, $7, $9, $12, $4);
 }
+| column_definition_ref data_type opt_collation AI COLUMN '(' expr ')' opt_ai_column_with opt_column_reference opt_position_column
+{
+  (void)($10);
+  ParseNode *attributes = NULL;
+  ParseNode *ai_marker = NULL;
+  set_data_type_collation($2, $3, true, false);
+  dup_expr_string($7, result, @7.first_column, @7.last_column);
+  malloc_terminal_node(ai_marker, result->malloc_pool_, T_AI_COLUMN);
+  malloc_non_terminal_node($$, result->malloc_pool_, T_COLUMN_DEFINITION, 7, $1, $2, attributes, $7, $9, $11, ai_marker);
+}
 | column_definition_ref SERIAL opt_column_attribute_list opt_position_column 
 {
   ParseNode *unsigned_bigint_type = NULL;
@@ -4937,6 +4948,52 @@ opt_generated_column_attribute_list generated_column_attribute
 {
   $$ = NULL;
 }
+;
+
+opt_ai_column_with:
+WITH '(' ai_column_options ')'
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_AI_COLUMN_OPTIONS, 1, $3);
+}
+| /*empty*/
+{
+  $$ = NULL;
+}
+;
+
+ai_column_options:
+ai_column_option
+{
+  $$ = $1;
+}
+| ai_column_options ',' ai_column_option
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+ai_column_option:
+relation_name COMP_EQ ai_column_option_value
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_LINK_NODE, 2, $1, $3);
+}
+;
+
+ai_column_option_value:
+INTNUM
+{
+  $1->type_ = T_NUMBER;
+  $$ = $1;
+}
+| STRING_VALUE
+{
+  $$ = $1;
+}
+| relation_name
+{
+  $$ = $1;
+}
+;
 
 generated_column_attribute:
 NOT NULLX
@@ -14723,6 +14780,18 @@ opt_set table_option_list_space_seperated
 | alter_foreign_key_action
 {
   malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_FOREIGN_KEY_OPTION, 1, $1);
+}
+| RETRY AI COLUMN column_name
+{
+  // ALTER TABLE t RETRY AI COLUMN col [WHERE ...]: re-run the AI column
+  // for the matching rows. The WHERE may use the STATUS pseudo-column
+  // (the target AI column's state); a backquoted `status` is the
+  // business column of that name.
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_RETRY_AI_COLUMN, 2, $4, NULL);
+}
+| RETRY AI COLUMN column_name WHERE expr
+{
+  malloc_non_terminal_node($$, result->malloc_pool_, T_ALTER_RETRY_AI_COLUMN, 2, $4, $6);
 }
 |
 DROP CONSTRAINT constraint_name

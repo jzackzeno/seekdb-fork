@@ -21,9 +21,11 @@
 #include "share/rc/ob_server_runtime.h"
 #include "lib/lock/ob_tc_rwlock.h"
 #include "lib/container/ob_se_array.h"
+#include "lib/task/ob_timer.h"
 #include "sql/privilege_check/ob_ai_model_priv_util.h"
 #include "share/ob_server_struct.h"
 #include "lib/worker.h"
+#include "observer/ai_service/ob_ai_column_worker.h"
 
 namespace oceanbase
 {
@@ -50,14 +52,18 @@ public:
   virtual ~ObAiService();
   static int server_module_init(ObAiService* &ai_service);
   int init();
-  int start() { return OB_SUCCESS; }
-  void stop() {};
-  void wait() {};
+  int start();
+  void stop();
+  void wait();
   void destroy();
 public:
   int get_ai_service_guard(ObAiServiceGuard &ai_service_guard);
 private:
   bool is_inited_;
+  // Timer driving the AI column worker (AiColumnWorkerTask): claims due
+  // AI column tasks every 200ms and publishes model results.
+  common::ObTimer timer_;
+  observer::AiColumnWorkerTask worker_task_;
   DISALLOW_COPY_AND_ASSIGN(ObAiService);
 };
 

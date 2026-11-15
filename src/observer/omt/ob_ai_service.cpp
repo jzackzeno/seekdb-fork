@@ -53,14 +53,37 @@ int ObAiService::init()
   int ret = OB_SUCCESS;
   if (IS_INIT) {
     ret = OB_INIT_TWICE;
+  } else if (OB_FAIL(timer_.init("ai_column_worker"))) {
+    LOG_WARN("ai column worker timer init failed", K(ret));
   } else {
     is_inited_ = true;
   }
   return ret;
 }
 
+int ObAiService::start()
+{
+  int ret = OB_SUCCESS;
+  // Drive AI column tasks every 200ms (delay is in microseconds).
+  if (OB_FAIL(timer_.schedule(worker_task_, 200 * 1000, true, true))) {
+    LOG_WARN("ai column worker schedule failed", K(ret));
+  }
+  return ret;
+}
+
+void ObAiService::stop()
+{
+  timer_.stop();
+}
+
+void ObAiService::wait()
+{
+  timer_.wait();
+}
+
 void ObAiService::destroy()
 {
+  timer_.destroy();
   is_inited_ = false;
 }
 
