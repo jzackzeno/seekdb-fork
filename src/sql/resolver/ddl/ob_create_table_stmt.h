@@ -19,6 +19,7 @@
 #include "share/ob_define.h"
 #include "sql/resolver/ddl/ob_table_stmt.h"
 #include "sql/resolver/ob_stmt_resolver.h"
+#include "sql/resolver/ddl/ob_ai_column_def.h"
 #include "sql/resolver/ddl/ob_create_index_stmt.h"
 
 namespace oceanbase
@@ -64,6 +65,11 @@ public:
   { return create_table_arg_.foreign_key_arg_list_; }
   const common::ObSArray<obcall::ObCreateForeignKeyArg> &get_read_only_foreign_key_arg_list() const
   { return create_table_arg_.foreign_key_arg_list_; }
+  // AI column definitions parsed from this CREATE TABLE, in column order.
+  // The DDL executor persists them into oceanbase.__all_ai_column after
+  // the table is created. Empty when the table has no AI column.
+  common::ObSEArray<AiColumnDef, 4> &get_ai_column_defs() { return ai_column_defs_; }
+  const common::ObSEArray<AiColumnDef, 4> &get_ai_column_defs() const { return ai_column_defs_; }
   virtual obcall::ObDDLArg &get_ddl_arg() { return create_table_arg_; }
   void set_sub_select(ObSelectStmt *select_stmt);
   void set_view_define(ObSelectStmt *select_stmt);
@@ -85,6 +91,8 @@ private:
   share::schema::ObStmtNeedPrivs::NeedPrivs view_need_privs_;
   common::ObSArray<obcall::ObCreateIndexArg> index_arg_list_;
   common::ObString masked_sql_;
+  // AI column definitions of this table, filled in by the resolver.
+  common::ObSEArray<AiColumnDef, 4> ai_column_defs_;
   //common::ObSEArray<ObRawExpr *, OB_DEFAULT_ARRAY_SIZE, common::ModulePageAllocator, true> partition_fun_expr_; // for range fun expr
   //common::ObSEArray<ObRawExpr *, OB_DEFAULT_ARRAY_SIZE, common::ModulePageAllocator, true> range_values_exprs_; //range partition expr
   // for future use: create table xxx as select ......

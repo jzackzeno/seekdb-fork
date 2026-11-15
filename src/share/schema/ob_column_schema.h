@@ -238,6 +238,8 @@ int assign(const ObColumnSchemaV2 &src_schema);
   inline bool is_virtual_generated_column() const { return column_flags_ & VIRTUAL_GENERATED_COLUMN_FLAG; }
   inline bool is_stored_generated_column() const { return column_flags_ & STORED_GENERATED_COLUMN_FLAG; }
   inline bool is_cte_generated_column() const { return column_flags_ & CTE_GENERATED_COLUMN_FLAG; }
+  inline bool is_ai_column() const { return column_flags_ & AI_COLUMN_FLAG; }
+  inline void set_is_ai_column(bool is_ai) { add_or_del_column_flag(AI_COLUMN_FLAG, is_ai); }
   inline bool is_default_expr_v2_column() const { return column_flags_ & DEFAULT_EXPR_V2_COLUMN_FLAG; }
   inline bool is_generated_column() const { return (is_virtual_generated_column() || is_stored_generated_column()); }
   inline bool is_generated_column_using_udf() const { return /*is_generated_column() && global index table clean the virtual gen col flag*/ !!(column_flags_ & GENERATED_COLUMN_UDF_EXPR); }

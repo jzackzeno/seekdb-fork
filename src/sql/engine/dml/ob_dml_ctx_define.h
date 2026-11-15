@@ -438,6 +438,10 @@ public:
   bool reserved_advanced_trigger_;
   ObExpr *trans_info_expr_;
   bool is_vec_hnsw_index_vid_opt_;
+  // True when the target table has at least one AI column. The DML
+  // after-row hook then creates / invalidates AI column tasks for the
+  // modified rows. Set by code generation from the table schema.
+  bool has_ai_column_;
 protected:
   ObDMLBaseCtDef(common::ObIAllocator &alloc,
                  ObDASDMLBaseCtDef &das_base_ctdef,
@@ -456,7 +460,8 @@ protected:
       is_table_without_pk_(false),
       reserved_advanced_trigger_(false),
       trans_info_expr_(nullptr),
-      is_vec_hnsw_index_vid_opt_(false)
+      is_vec_hnsw_index_vid_opt_(false),
+      has_ai_column_(false)
   { }
 };
 

@@ -21,6 +21,7 @@
 #include "sql/resolver/ddl/ob_table_stmt.h"
 #include "sql/resolver/ddl/ob_ddl_stmt.h"
 #include "sql/resolver/ob_stmt_resolver.h"
+#include "sql/resolver/ddl/ob_ai_column_def.h"
 #include "common/sql_mode/ob_sql_mode.h"
 #include "lib/hash/ob_placement_hashset.h"
 
@@ -57,6 +58,7 @@ public:
   int set_origin_database_name(const common::ObString &origin_db_name);
   int set_origin_table_name(const common::ObString &origin_table_name);
   void set_table_id(const uint64_t table_id);
+  uint64_t get_table_id() const { return alter_table_arg_.alter_table_schema_.get_table_id(); }
   inline void set_alter_table_option(){alter_table_arg_.is_alter_options_ = true;}
   inline void set_convert_to_character(){alter_table_arg_.is_convert_to_character_ = true;}
   inline void set_alter_table_column(){alter_table_arg_.is_alter_columns_ = true;}
@@ -93,6 +95,25 @@ public:
     { return alter_table_arg_.index_arg_list_; }
 
   obcall::ObAlterTriggerArg &get_tg_arg() { return tg_arg_; }
+  // RETRY AI COLUMN: set by the resolver when this ALTER TABLE only
+  // retries one AI column. The executor runs it locally (no rootserver
+  // RPC). retry_where_sql_ holds the WHERE clause printed back to SQL
+  // text by the resolver (empty when the RETRY has no WHERE).
+  bool is_retry_ai_column() const { return is_retry_ai_column_; }
+  void set_retry_ai_column(const common::ObString &column_name,
+                           const common::ObString &where_sql)
+  {
+    is_retry_ai_column_ = true;
+    retry_ai_column_name_ = column_name;
+    retry_where_sql_ = where_sql;
+  }
+  const common::ObString &get_retry_ai_column_name() const { return retry_ai_column_name_; }
+  const common::ObString &get_retry_where_sql() const { return retry_where_sql_; }
+  // AI column definitions added by this ALTER TABLE, in column order.
+  // The DDL executor persists them into oceanbase.__all_ai_column after
+  // the alter succeeds. Empty when no AI column is added.
+  common::ObSEArray<AiColumnDef, 4> &get_ai_column_defs() { return ai_column_defs_; }
+  const common::ObSEArray<AiColumnDef, 4> &get_ai_column_defs() const { return ai_column_defs_; }
   const ObTableSchema &get_alter_table_schema() const { return alter_table_arg_.alter_table_schema_; }
   ObTableSchema &get_alter_table_schema() { return alter_table_arg_.alter_table_schema_; }
   obcall::ObExchangePartitionArg &get_exchange_partition_arg() { return exchange_partition_arg_;}
@@ -114,6 +135,12 @@ private:
   obcall::ObAlterTriggerArg tg_arg_;
   uint64_t alter_table_action_count_;
   obcall::ObExchangePartitionArg exchange_partition_arg_;
+  // AI column definitions added by this ALTER TABLE, filled by the resolver.
+  common::ObSEArray<AiColumnDef, 4> ai_column_defs_;
+  // RETRY AI COLUMN target, filled by the resolver (see set_retry_ai_column).
+  bool is_retry_ai_column_;
+  common::ObString retry_ai_column_name_;
+  common::ObString retry_where_sql_;
 };
 
 inline int ObAlterTableStmt::set_tz_info_wrap(const common::ObTimeZoneInfoWrap &tz_info_wrap)

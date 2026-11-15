@@ -348,11 +348,18 @@ public:
   ObAIFuncModel(ObIAllocator &allocator, const ObAIFuncExprInfo &info, const share::ObAiModelEndpointInfo &endpoint_info)
   : allocator_(&allocator),
     info_(info),
-    endpoint_info_(endpoint_info)
+    endpoint_info_(endpoint_info),
+    timeout_sec_(0)
   {}
    virtual ~ObAIFuncModel() {}
    // completion
    int call_completion(ObString &prompt, ObJsonObject *config, ObString &result);
+   // Same as call_completion, but sends system_prompt as the system message
+   // and prompt as the user message. Used by the AI column worker, whose
+   // result-type hint (JSON / integer) must reach the model as a system
+   // prompt; the synchronous AI_COMPLETE keeps the system message empty.
+   int call_completion_with_system(ObString &system_prompt, ObString &prompt,
+                                   ObJsonObject *config, ObString &result);
    int call_completion_vector(ObArray<ObString> &prompts, ObJsonObject *config, ObArray<ObString> &results);
    // dense_embedding
    int call_dense_embedding(ObString &content, ObJsonObject *config, ObString &result);
@@ -360,6 +367,9 @@ public:
    int call_dense_embedding_vector_v2(ObArray<ObString> &contents, ObJsonObject *config, ObArray<ObString> &results);
    // rerank
    int call_rerank(ObString &query, ObJsonArray *contents, ObJsonArray *&results);
+   // HTTP timeout in seconds for the model calls below; 0 keeps the client
+   // default (60s). Set by the AI column worker from the column's timeout_ms.
+   void set_timeout_sec(int64_t timeout_sec) { timeout_sec_ = timeout_sec; }
  private:
    bool is_completion_type() {return info_.type_ == share::EndpointType::COMPLETION;}
    bool is_dense_embedding_type() {return info_.type_ == share::EndpointType::DENSE_EMBEDDING;}
@@ -368,6 +378,7 @@ public:
    ObIAllocator *allocator_;
    const ObAIFuncExprInfo &info_;
    const share::ObAiModelEndpointInfo &endpoint_info_;
++  int64_t timeout_sec_;
    DISALLOW_COPY_AND_ASSIGN(ObAIFuncModel);
 };
 
