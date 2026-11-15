@@ -25,6 +25,7 @@
 #include "share/schema/ob_schema_struct.h"
 #include "common/sql_mode/ob_sql_mode.h"
 #include "sql/resolver/ddl/ob_table_stmt.h"
+#include "sql/resolver/ddl/ob_ai_column_def.h"
 #include "sql/resolver/ddl/ob_alter_table_stmt.h"
 #include "sql/resolver/ddl/ob_create_index_stmt.h"
 #include "sql/resolver/ddl/ob_create_table_stmt.h"
@@ -105,6 +106,8 @@ struct ObDefaultValueRes
   bool is_literal_;
   common::ObObjParam &value_;
 };
+
+// AI COLUMN definition parsed from DDL (see ob_ai_column_def.h).
 
 class ObDDLResolver : public ObStmtResolver
 {
@@ -517,7 +520,39 @@ protected:
       const ObTableSchema &table_schema,
       const bool unused_flag = false,
       const bool is_create_table_as = false,
-      const bool allow_has_default = true);
+      const bool allow_has_default = true,
+      // When the column is an AI column, the parsed definition is returned
+      // here so the caller can build the hidden columns and persist the
+      // metadata. NULL when the caller does not need it.
+      AiColumnDef *ai_def_out = NULL);
+  // Parse an AI COLUMN definition (T_COLUMN_DEFINITION with a T_AI_COLUMN
+  // marker in children_[6]) into AiColumnDef. Validates the AI function call
+  // (AI_COMPLETE / AI_EMBED), the WITH options and the dependency columns.
+  // The table_schema carries the columns defined so far, used to reject
+  // AI columns that depend on another AI column.
+  int parse_ai_column_definition(
+      ParseNode *node,
+      const share::schema::ObColumnSchemaV2 &column,
+      const share::schema::ObTableSchema &table_schema,
+      AiColumnDef &ai_def);
+  // Resolve ai_def.depends_on_ (column names) into the comma-separated
+  // column-id list ai_def.dependency_column_ids_ using table_schema.
+  // Names that do not resolve (e.g. a column defined after the AI column
+  // in CREATE TABLE, where the schema is still incomplete) are skipped;
+  // the caller refills the list once the schema is complete.
+  int fill_ai_dependency_column_ids(
+      const share::schema::ObTableSchema &table_schema,
+      AiColumnDef &ai_def);
+  // Build the three hidden columns (state / request / result_spec) for one
+  // AI column. The caller assigns the column ids and appends them to the
+  // table schema.
+  static int build_ai_column_hidden_columns(
+      const share::schema::ObColumnSchemaV2 &ai_column,
+      const AiColumnDef &ai_def,
+      common::ObIAllocator &allocator,
+      share::schema::ObColumnSchemaV2 &state_column,
+      share::schema::ObColumnSchemaV2 &request_column,
+      share::schema::ObColumnSchemaV2 &result_spec_column);
   int drop_not_null_constraint(const share::schema::ObColumnSchemaV2 &column);
   int resolve_normal_column_attribute_constr_not_null(ObColumnSchemaV2 &column,
                                                       ParseNode *attrs_node,

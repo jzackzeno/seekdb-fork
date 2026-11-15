@@ -2086,6 +2086,32 @@ int ObDmlCgService::check_is_heap_table(ObLogicalOperator &op,
   return ret;
 }
 
+int ObDmlCgService::check_has_ai_column(ObLogicalOperator &op,
+                                        uint64_t ref_table_id,
+                                        bool &has_ai_column)
+{
+  int ret = OB_SUCCESS;
+  has_ai_column = false;
+  ObLogPlan *log_plan = op.get_plan();
+  ObSchemaGetterGuard *schema_guard = NULL;
+  const ObTableSchema *table_schema = NULL;
+  if (OB_ISNULL(log_plan) ||
+      OB_ISNULL(schema_guard = log_plan->get_optimizer_context().get_schema_guard())) {
+    ret = OB_ERR_UNEXPECTED;
+  } else if (OB_FAIL(schema_guard->get_table_schema(ref_table_id, table_schema))) {
+  } else if (OB_ISNULL(table_schema)) {
+    ret = OB_ERR_UNEXPECTED;
+  } else {
+    for (int64_t i = 0; !has_ai_column && i < table_schema->get_column_count(); ++i) {
+      const ObColumnSchemaV2 *col = table_schema->get_column_schema_by_idx(i);
+      if (OB_NOT_NULL(col) && col->is_ai_column()) {
+        has_ai_column = true;
+      }
+    }
+  }
+  return ret;
+}
+
 int ObDmlCgService::generate_dml_base_ctdef(ObLogicalOperator &op,
                                             const IndexDMLInfo &index_dml_info,
                                             ObDMLBaseCtDef &dml_base_ctdef,
@@ -2102,6 +2128,8 @@ int ObDmlCgService::generate_dml_base_ctdef(ObLogicalOperator &op,
   } else if (index_dml_info.is_primary_index_) {
     bool is_heap_table = false;
     if (OB_FAIL(check_is_heap_table(op, index_dml_info.ref_table_id_, is_heap_table))) {
+    } else if (OB_FAIL(check_has_ai_column(op, index_dml_info.ref_table_id_,
+                                           dml_base_ctdef.has_ai_column_))) {
     } else {
       dml_base_ctdef.is_table_without_pk_ = is_heap_table;
     }

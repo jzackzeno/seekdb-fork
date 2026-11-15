@@ -490,6 +490,11 @@ protected:
   int check_basic_column_generated(const ObColumnRefRawExpr *col_expr,
                                   ObDMLStmt *dml_stmt,
                                   bool &is_generated);
+  // True when the current statement runs as internal SQL: a nested statement
+  // issued by the DML after-row hook, or a real inner session (e.g. the AI
+  // column worker). Internal writes may assign AI result columns; user SQL
+  // must not.
+  bool is_internal_ai_column_write() const;
   virtual int expand_view(TableItem &view_item);
   int do_expand_view(TableItem &view_item, ObChildStmtResolver &view_resolver);
   int check_pad_generated_column(const ObSQLMode sql_mode,

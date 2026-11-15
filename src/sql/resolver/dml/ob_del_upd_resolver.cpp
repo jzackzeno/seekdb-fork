@@ -130,6 +130,11 @@ int ObDelUpdResolver::resolve_assignments(const ParseNode &parse_node,
         bool is_generated_column = true;
         // Mysql only allows updating generated columns to their default value
         if (OB_FAIL(check_basic_column_generated(ref_expr, stmt, is_generated_column))) {
+        } else if (ref_expr->is_ai_column() && !is_internal_ai_column_write()) {
+          // AI result columns are written back by the worker only; business
+          // SQL must not assign them directly (not even DEFAULT).
+          ret = OB_NOT_SUPPORTED;
+          LOG_USER_ERROR(OB_NOT_SUPPORTED, "assign value to AI column");
         } else {
           if (T_DEFAULT == expr->get_expr_type()) {
             ObDefaultValueUtils utils(stmt, &params_, this);
@@ -2342,6 +2347,12 @@ int ObDelUpdResolver::resolve_insert_values(const ParseNode *node,
               }
             } else if (OB_FAIL(check_basic_column_generated(column_expr, del_upd_stmt,
                                                             is_generated_column))) {
+            } else if (column_expr->is_ai_column() && !is_internal_ai_column_write()) {
+              // AI result columns are written back by the worker only; business
+              // SQL must not assign them directly. (DEFAULT is still allowed:
+              // it resolves to NULL and the after-row hook creates the task.)
+              ret = OB_NOT_SUPPORTED;
+              LOG_USER_ERROR(OB_NOT_SUPPORTED, "assign value to AI column");
             } else if (is_generated_column) {
               ret = OB_NON_DEFAULT_VALUE_FOR_GENERATED_COLUMN;
               ColumnItem *orig_col_item = NULL;

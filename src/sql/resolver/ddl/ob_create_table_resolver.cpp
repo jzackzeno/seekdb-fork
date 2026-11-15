@@ -689,13 +689,18 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           common::ObString pk_name;
           // ele_pos + 1, points to the next column_schema
           ++ele_pos;
+          // ai_def is filled in by resolve_column_definition when this
+          // column is an AI column; used below to build hidden columns.
+          AiColumnDef ai_def;
           if (OB_FAIL(resolve_column_definition(column, element, stat,
                                                 is_modify_column_visibility,
                                                 pk_name,
                                                 table_schema,
                                                 false,
-                                                is_create_table_as))) {
-          } else if (OB_FAIL(check_default_value(column.get_cur_default_value(),
+                                                is_create_table_as,
+                                                true,
+                                                &ai_def))) {
+          } else if (!column.is_ai_column() && OB_FAIL(check_default_value(column.get_cur_default_value(),
                                           session_info_->get_tz_info_wrap(),
                                           NULL,
                                           *allocator_,
@@ -842,6 +847,40 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
             if (OB_FAIL(stats.push_back(stat))) {
             }
           }
+
+          // AI column: build the three hidden columns (state / request /
+          // result_spec), assign them column ids and append them to
+          // resolved_cols; the post-loop block adds them to table_schema.
+          // The parsed definition is kept on the stmt so the executor can
+          // persist it into oceanbase.__all_ai_column.
+          // NOTE: this must stay the last use of `column` in this iteration:
+          // push_back may reallocate resolved_cols and invalidate the ref.
+          if (OB_SUCC(ret) && column.is_ai_column()) {
+            ObColumnSchemaV2 state_col;
+            ObColumnSchemaV2 request_col;
+            ObColumnSchemaV2 result_spec_col;
+            if (OB_FAIL(build_ai_column_hidden_columns(column, ai_def, *allocator_,
+                                                        state_col, request_col,
+                                                        result_spec_col))) {
+            } else {
+              state_col.set_column_id(gen_column_id());
+              request_col.set_column_id(gen_column_id());
+              result_spec_col.set_column_id(gen_column_id());
+              ai_def.column_id_ = column.get_column_id();
+              ai_def.state_column_id_ = state_col.get_column_id();
+              ai_def.request_column_id_ = request_col.get_column_id();
+              ai_def.result_spec_column_id_ = result_spec_col.get_column_id();
+              // Deep-copy the column name into the resolver allocator:
+              // the `column` ref points into the local resolved_cols array.
+              if (OB_FAIL(ob_write_string(*allocator_, column.get_column_name_str(),
+                                          ai_def.column_name_))) {
+              } else if (OB_FAIL(resolved_cols.push_back(state_col))) {
+              } else if (OB_FAIL(resolved_cols.push_back(request_col))) {
+              } else if (OB_FAIL(resolved_cols.push_back(result_spec_col))) {
+              } else if (OB_FAIL(create_table_stmt->get_ai_column_defs().push_back(ai_def))) {
+              }
+            }
+          }
         }
       } else if (T_PRIMARY_KEY == element->type_) {
         if (primary_key_set_in_heap_table) {
@@ -892,6 +931,16 @@ int ObCreateTableResolver::resolve_table_elements(const ParseNode *node,
           ObColumnNameHashWrapper name_key(hidden_col.get_column_name_str());
           if (OB_FAIL(column_name_set_.set_refactored(name_key))) {
           }
+        }
+      }
+    }
+
+    // AI columns: the table schema is complete now (all columns plus the
+    // hidden columns), so dependency names can be resolved to column ids.
+    if (OB_SUCC(ret)) {
+      common::ObSEArray<AiColumnDef, 4> &ai_defs = create_table_stmt->get_ai_column_defs();
+      for (int64_t i = 0; OB_SUCC(ret) && i < ai_defs.count(); ++i) {
+        if (OB_FAIL(fill_ai_dependency_column_ids(table_schema, ai_defs.at(i)))) {
         }
       }
     }

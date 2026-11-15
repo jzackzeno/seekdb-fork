@@ -837,6 +837,11 @@ int ObInsertResolver::check_insert_select_field(ObInsertStmt &insert_stmt,
     } else if (OB_FAIL(ObDMLResolver::check_basic_column_generated(value_desc,
                                                                    &insert_stmt,
                                                                    is_generated_column))) {
+    } else if (value_desc->is_ai_column() && !is_internal_ai_column_write()) {
+      // AI result columns are written back by the worker only; business SQL
+      // must not assign them directly, including via INSERT ... SELECT.
+      ret = OB_NOT_SUPPORTED;
+      LOG_USER_ERROR(OB_NOT_SUPPORTED, "assign value to AI column");
     } else if (is_generated_column) {
       if (select_stmt.get_table_size() == 1 &&
           select_stmt.get_table_item(0) != NULL &&

@@ -38,6 +38,10 @@
 #include "sql/monitor/show_trace/ob_show_trace.h"
 #include "sql/optimizer/ob_optimizer.h"
 #include "share/rc/ob_server_runtime.h"
+#include "common/mysqlclient/ob_mysql_result.h"
+#include "lib/string/ob_sql_string.h"
+#include "sql/resolver/dml/ob_dml_stmt.h"
+#include "share/system_variable/ob_sys_var_class_type.h"
 
 namespace oceanbase
 {
@@ -2241,6 +2245,150 @@ int ObSql::generate_stmt(ParseResult &parse_result,
   return ret;
 }
 
+struct AiColumnStrictReadRef {
+  uint64_t table_id_;
+  uint64_t column_id_;
+};
+
+// Collect every AI column referenced by a DML stmt (including subqueries).
+static int collect_ai_column_refs(ObDMLStmt &stmt,
+                                  ObIArray<AiColumnStrictReadRef> &refs)
+{
+  int ret = OB_SUCCESS;
+  const ObIArray<ColumnItem> &column_items = stmt.get_column_items();
+  for (int64_t i = 0; OB_SUCC(ret) && i < column_items.count(); ++i) {
+    const ObColumnRefRawExpr *expr = column_items.at(i).get_expr();
+    if (NULL != expr && expr->is_ai_column()) {
+      AiColumnStrictReadRef ref;
+      ref.table_id_ = expr->get_table_id();
+      ref.column_id_ = expr->get_column_id();
+      bool exists = false;
+      for (int64_t j = 0; j < refs.count(); ++j) {
+        if (refs.at(j).table_id_ == ref.table_id_
+            && refs.at(j).column_id_ == ref.column_id_) {
+          exists = true;
+          break;
+        }
+      }
+      if (!exists && OB_FAIL(refs.push_back(ref))) {
+      }
+    }
+  }
+  if (OB_SUCC(ret)) {
+    ObSEArray<ObSelectStmt*, 4> child_stmts;
+    if (OB_FAIL(stmt.get_child_stmts(child_stmts))) {
+    } else {
+      for (int64_t i = 0; OB_SUCC(ret) && i < child_stmts.count(); ++i) {
+        if (OB_FAIL(collect_ai_column_refs(*child_stmts.at(i), refs))) {
+        }
+      }
+    }
+  }
+  return ret;
+}
+
+// Strict read check for AI columns: when the session variable
+// ai_column_strict_read is ON, a DML statement referencing an AI column
+// fails with OB_AI_COLUMN_NOT_READY if any row of that column is not
+// READY. Internal and nested sessions (worker publish, DML hook, RETRY)
+// are exempt.
+static int check_ai_column_strict_read(ObSQLSessionInfo &session_info, ObDMLStmt &stmt)
+{
+  int ret = OB_SUCCESS;
+  bool strict_read = false;
+  if (OB_FAIL(session_info.get_sys_variable(share::SYS_VAR_AI_COLUMN_STRICT_READ, strict_read))) {
+    LOG_WARN("fail to get ai_column_strict_read", K(ret));
+  } else if (!strict_read) {
+    // Strict read disabled: not-ready AI columns read as NULL.
+  } else if (session_info.is_real_inner_session() || session_info.is_nested_session()) {
+    // Internal writes (worker publish, DML hook, RETRY) are exempt.
+  } else {
+    ObSEArray<AiColumnStrictReadRef, 8> refs;
+    if (OB_FAIL(collect_ai_column_refs(stmt, refs))) {
+    } else if (refs.empty()) {
+      // The statement references no AI column.
+    } else if (OB_ISNULL(GCTX.sql_proxy_)) {
+      ret = OB_ERR_UNEXPECTED;
+      LOG_WARN("sql proxy is null", K(ret));
+    } else {
+      ObArenaAllocator alloc(ObModIds::OB_SQL_EXECUTOR);
+      for (int64_t i = 0; OB_SUCC(ret) && i < refs.count(); ++i) {
+        const uint64_t table_id = refs.at(i).table_id_;
+        const uint64_t column_id = refs.at(i).column_id_;
+        ObSqlString def_sql;
+        ObString state_col_name;
+        ObString db_name;
+        ObString table_name;
+        // Resolve the state hidden column and the db/table names.
+        if (OB_FAIL(def_sql.assign_fmt(
+                "SELECT hs.column_name AS state_col, d.database_name, t.table_name "
+                "FROM oceanbase.__all_ai_column c "
+                "JOIN oceanbase.__all_column hs "
+                "  ON hs.table_id = c.table_id AND hs.column_id = c.state_column_id "
+                "JOIN oceanbase.__all_table t ON t.table_id = c.table_id "
+                "JOIN oceanbase.__all_database d ON d.database_id = t.database_id "
+                "WHERE c.table_id = %ld AND c.column_id = %ld",
+                static_cast<int64_t>(table_id), static_cast<int64_t>(column_id)))) {
+        } else {
+          SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+            ObMySQLResult *result = NULL;
+            if (OB_FAIL(GCTX.sql_proxy_->read(res, def_sql.ptr()))) {
+            } else if (OB_ISNULL(result = res.get_result())) {
+              ret = OB_ERR_UNEXPECTED;
+            } else if (OB_FAIL(result->next())) {
+              if (OB_ITER_END == ret) {
+                // No metadata row: the column is not an AI column in the
+                // current schema (e.g. dropped concurrently); skip it.
+                ret = OB_SUCCESS;
+              }
+            } else {
+              ObObj obj;
+              if (OB_FAIL(result->get_obj("state_col", obj))) {
+              } else if (OB_FAIL(obj.get_string(state_col_name))) {
+              } else if (OB_FAIL(result->get_obj("database_name", obj))) {
+              } else if (OB_FAIL(obj.get_string(db_name))) {
+              } else if (OB_FAIL(result->get_obj("table_name", obj))) {
+              } else if (OB_FAIL(obj.get_string(table_name))) {
+              } else if (OB_FAIL(ob_write_string(alloc, state_col_name, state_col_name))) {
+              } else if (OB_FAIL(ob_write_string(alloc, db_name, db_name))) {
+              } else if (OB_FAIL(ob_write_string(alloc, table_name, table_name))) {
+              }
+            }
+          }
+        }
+        if (OB_SUCC(ret) && !state_col_name.empty()) {
+          // Any row whose state is not READY blocks the statement.
+          ObSqlString check_sql;
+          if (OB_FAIL(check_sql.assign_fmt(
+                  "SELECT 1 FROM `%.*s`.`%.*s` WHERE `%.*s` != 'READY' LIMIT 1",
+                  static_cast<int>(db_name.length()), db_name.ptr(),
+                  static_cast<int>(table_name.length()), table_name.ptr(),
+                  static_cast<int>(state_col_name.length()), state_col_name.ptr()))) {
+          } else {
+            SMART_VAR(ObMySQLProxy::MySQLResult, res) {
+              ObMySQLResult *result = NULL;
+              if (OB_FAIL(GCTX.sql_proxy_->read(res, check_sql.ptr()))) {
+              } else if (OB_ISNULL(result = res.get_result())) {
+                ret = OB_ERR_UNEXPECTED;
+              } else if (OB_FAIL(result->next())) {
+                if (OB_ITER_END == ret) {
+                  // No not-ready row: the column is fully ready.
+                  ret = OB_SUCCESS;
+                }
+              } else {
+                ret = OB_AI_COLUMN_NOT_READY;
+                LOG_USER_ERROR(OB_AI_COLUMN_NOT_READY,
+                               static_cast<int64_t>(table_id), static_cast<int64_t>(column_id));
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+  return ret;
+}
+
 int ObSql::generate_physical_plan(ParseResult &parse_result,
                                   ObPlanCacheCtx *pc_ctx,
                                   ObSqlCtx &sql_ctx,
@@ -2284,7 +2432,10 @@ int ObSql::generate_physical_plan(ParseResult &parse_result,
   } else if (basic_stmt->is_dml_stmt()
              || basic_stmt->is_explain_stmt()
             ) {
-    if (OB_FAIL(generate_plan(parse_result, pc_ctx, sql_ctx, result, mode, basic_stmt,
+    if (basic_stmt->is_dml_stmt()
+        && OB_FAIL(check_ai_column_strict_read(*sql_ctx.session_info_,
+                                              *static_cast<ObDMLStmt*>(basic_stmt)))) {
+    } else if (OB_FAIL(generate_plan(parse_result, pc_ctx, sql_ctx, result, mode, basic_stmt,
                              stmt_need_privs))) {
     }
   } else if (stmt::T_EXECUTE == basic_stmt->get_stmt_type() &&
