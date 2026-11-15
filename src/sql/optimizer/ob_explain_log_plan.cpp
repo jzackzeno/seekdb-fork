@@ -28,6 +28,12 @@ using namespace oceanbase::common;
 using namespace oceanbase::json;
 using namespace oceanbase::sql::log_op_def;
 
+// Forward declarations: the DESCRIBE helpers are file-local static
+// functions, so ob_explain_log_plan.h needs no new declarations and no
+// ObLogValues forward declaration. This bisect step touches only this file.
+static int build_describe_rows(const ObDMLStmt *child_stmt, ObLogValues &values_op);
+static int allocate_describe_output_exprs(ObOptimizerContext &optimizer_context, ObLogValues &values_op);
+
 /**
  *  This function does two things:
  *
@@ -112,7 +118,7 @@ int ObExplainLogPlan::generate_normal_raw_plan()
     } else if (NULL == values_op) {
       ret = OB_ERR_UNEXPECTED;
     } else if (EXPLAIN_DESCRIBE_SELECT == explain_stmt->get_explain_type()
-               && OB_FAIL(allocate_describe_output_exprs(*values_op))) {
+               && OB_FAIL(allocate_describe_output_exprs(get_optimizer_context(), *values_op))) {
     } else if (EXPLAIN_DESCRIBE_SELECT != explain_stmt->get_explain_type()
                && OB_FAIL(allocate_output_expr_for_values_op(*values_op))) {
     } else {
@@ -140,7 +146,7 @@ static const char *describe_type_name(common::ObObjType type)
   }
 }
 
-int ObExplainLogPlan::build_describe_rows(const ObDMLStmt *child_stmt, ObLogValues &values_op)
+static int build_describe_rows(const ObDMLStmt *child_stmt, ObLogValues &values_op)
 {
   int ret = OB_SUCCESS;
   if (OB_ISNULL(child_stmt) || !child_stmt->is_select_stmt()) {
@@ -263,10 +269,10 @@ int ObExplainLogPlan::build_describe_rows(const ObDMLStmt *child_stmt, ObLogValu
   return ret;
 }
 
-int ObExplainLogPlan::allocate_describe_output_exprs(ObLogValues &values_op)
+static int allocate_describe_output_exprs(ObOptimizerContext &optimizer_context, ObLogValues &values_op)
 {
   int ret = OB_SUCCESS;
-  if (OB_ISNULL(optimizer_context_.get_session_info())) {
+  if (OB_ISNULL(optimizer_context.get_session_info())) {
     ret = OB_ERR_UNEXPECTED;
   } else {
     // Six VARCHAR output columns: column_name, column_type, null, key,
@@ -275,15 +281,15 @@ int ObExplainLogPlan::allocate_describe_output_exprs(ObLogValues &values_op)
     // Values operator emits 6 cells per row.
     for (int64_t i = 0; OB_SUCC(ret) && i < 6; ++i) {
       ObConstRawExpr *output = NULL;
-      if (OB_FAIL(optimizer_context_.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
+      if (OB_FAIL(optimizer_context.get_expr_factory().create_raw_expr(T_VARCHAR, output))) {
       } else {
         ObObj v;
         v.set_varchar(" ");
         v.set_collation_type(ObCharset::get_system_collation());
         output->set_value(v);
-        if (OB_FAIL(output->formalize(optimizer_context_.get_session_info()))) {
+        if (OB_FAIL(output->formalize(optimizer_context.get_session_info()))) {
         } else if (OB_FAIL(values_op.get_output_exprs().push_back(output))) {
-        } else if (OB_FAIL(get_optimizer_context().get_all_exprs().append(output))) {
+        } else if (OB_FAIL(optimizer_context.get_all_exprs().append(output))) {
         }
       }
     }
