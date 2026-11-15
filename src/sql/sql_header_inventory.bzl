@@ -367,6 +367,7 @@ SQL_INTERFACE_CLOSURE_HEADERS = [
     "printer/ob_raw_expr_printer.h",
     "resolver/cmd/ob_cmd_stmt.h",
     "resolver/cmd/ob_load_data_stmt.h",
+    "resolver/ddl/ob_ai_column_def.h",
     "resolver/ddl/ob_alter_table_stmt.h",
     "resolver/ddl/ob_create_index_stmt.h",
     "resolver/ddl/ob_create_table_resolver_base.h",

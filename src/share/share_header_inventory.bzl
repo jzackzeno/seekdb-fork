@@ -2,6 +2,7 @@
 
 SHARE_PUBLIC_HEADER_ROOTS = [
     "aggregate/ob_pushdown_aggregate_protocol.h",
+    "ai_service/ob_ai_model_info.h",
     "ai_service/ob_ai_service_struct.h",
     "allocator/ob_reserve_arena.h",
     "autoincrement/ob_i_tablet_autoincrement_admin.h",
@@ -185,6 +186,7 @@ SHARE_PUBLIC_HEADER_ROOTS = [
     "resource_limit_calculator/ob_resource_limit_calculator.h",
     "roaringbitmap/ob_rb_memory_mgr.h",
     "rpc/ob_server_task.h",
+    "schema/ob_ai_model_mgr.h",
     "schema/ob_ai_model_sql_service.h",
     "schema/ob_col_desc.h",
     "schema/ob_column_schema.h",
@@ -252,7 +254,6 @@ SHARE_PUBLIC_HEADER_ROOTS = [
 ]
 
 SHARE_INTERFACE_CLOSURE_HEADERS = [
-    "ai_service/ob_ai_model_info.h",
     "cache/ob_cache_utils.h",
     "cache/ob_kvcache_hazard_domain.h",
     "cache/ob_kvcache_hazard_pointer.h",
@@ -310,7 +311,6 @@ SHARE_INTERFACE_CLOSURE_HEADERS = [
     "resource/ob_server_resource.h",
     "resource_limit_calculator/ob_resource_commmon.h",
     "resource_limit_calculator/ob_resource_limit_calculator_def.h",
-    "schema/ob_ai_model_mgr.h",
     "schema/ob_ddl_epoch.h",
     "schema/ob_mock_fk_parent_table_mgr.h",
     "schema/ob_objpriv_mysql_schema_struct.h",
