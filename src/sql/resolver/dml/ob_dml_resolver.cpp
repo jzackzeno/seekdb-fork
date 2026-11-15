@@ -1918,6 +1918,11 @@ int ObDMLResolver::resolve_basic_column_item(const TableItem &table_item,
       bool domain_id_need_column_ref_expr = false;
       if (ObDomainIdUtils::is_domain_id_index_col(col_schema)
           && OB_FAIL(check_domain_id_need_column_ref_expr(*stmt, schema_guard, domain_id_need_column_ref_expr, col_schema))) {
+      } else if (col_schema->is_ai_column()) {
+        // AI column: the stored "default" is the AI function call text, not
+        // a value. A missing AI column defaults to NULL; the after-row hook
+        // fills the state/request hidden columns and creates the task.
+        column_item.set_default_value(ObObj());
       } else if (col_schema->is_generated_column()) {
         column_item.set_default_value(ObObj()); // set null to generated default value
         if (OB_FAIL(col_schema->get_cur_default_value().get_string(col_def))) {
@@ -5666,6 +5671,12 @@ int ObDMLResolver::resolve_partitions(const ParseNode *part_node,
     }
   }
   return ret;
+}
+
+bool ObDMLResolver::is_internal_ai_column_write() const
+{
+  return NULL != session_info_
+         && (session_info_->is_nested_session() || session_info_->is_real_inner_session());
 }
 
 int ObDMLResolver::check_basic_column_generated(const ObColumnRefRawExpr *col_expr,
