@@ -492,6 +492,20 @@ int ObCreateTableExecutor::execute(ObExecContext &ctx, ObCreateTableStmt &stmt)
       if (OB_FAIL(execute_ctas(ctx, stmt))){
       }
     }
+    // Persist AI column metadata now that the table exists. The table id
+    // comes from the create result; the column ids were assigned by the
+    // resolver during CREATE TABLE.
+    if (OB_SUCC(ret) && OB_ISNULL(select_stmt)
+        && 0 != stmt.get_ai_column_defs().count()
+        && OB_INVALID_ID != res.table_id_ && !res.do_nothing_) {
+      ObMySQLProxy *sql_proxy = ctx.get_sql_proxy();
+      if (OB_ISNULL(sql_proxy)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(ObDDLExecutorUtil::write_ai_column_meta(
+                     *sql_proxy, res.table_id_, stmt.get_ai_column_defs()))) {
+        LOG_WARN("fail to write ai column meta", K(ret), K(res.table_id_));
+      }
+    }
     SERVER_EVENT_ADD("ddl", "create table execute finish",
       "ret", ret,
       "trace_id", *ObCurTraceId::get_trace_id(),
@@ -769,6 +783,18 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
           [&]{ return ctx.root_command_service().alter_trigger(stmt.get_tg_arg()); }),
           GCTX.self_addr());
     }
+  } else if (stmt.is_retry_ai_column()) {
+    // RETRY AI COLUMN runs locally against the AI column metadata and
+    // task tables; it never goes through the rootserver ALTER path.
+    ObMySQLProxy *sql_proxy = ctx.get_sql_proxy();
+    if (OB_ISNULL(sql_proxy)) {
+      ret = OB_ERR_UNEXPECTED;
+    } else {
+      OZ (ObDDLExecutorUtil::retry_ai_column(*sql_proxy,
+                                             stmt.get_table_id(),
+                                             stmt.get_retry_ai_column_name(),
+                                             stmt.get_retry_where_sql()));
+    }
   } else {
     ObSQLSessionInfo *my_session = NULL;
     obcall::ObAlterTableRes res;
@@ -870,6 +896,29 @@ int ObAlterTableExecutor::execute(ObExecContext &ctx, ObAlterTableStmt &stmt)
     char table_info_buffer[256];
     snprintf(table_info_buffer, sizeof(table_info_buffer), "table_id:%ld, hidden_table_id:%ld", 
               alter_table_arg.table_id_, alter_table_arg.hidden_table_id_);
+
+    // Persist AI column metadata for columns added by this ALTER TABLE.
+    // Column ids were assigned by rootserver; resolve them from the
+    // refreshed schema by name.
+    if (OB_SUCC(ret) && 0 != stmt.get_ai_column_defs().count()) {
+      ObMySQLProxy *sql_proxy = ctx.get_sql_proxy();
+      ObSchemaGetterGuard schema_guard;
+      const ObTableSchema *table_schema = NULL;
+      if (OB_ISNULL(sql_proxy)) {
+        ret = OB_ERR_UNEXPECTED;
+      } else if (OB_FAIL(refresh_schema_for_table())) {
+      } else if (OB_FAIL(ObMultiVersionSchemaService::get_instance().get_runtime_schema_guard(schema_guard))) {
+      } else if (OB_FAIL(schema_guard.get_table_schema(
+                     alter_table_arg.alter_table_schema_.get_origin_database_name(),
+                     alter_table_arg.alter_table_schema_.get_origin_table_name(),
+                     false, table_schema, true))) {
+      } else if (OB_ISNULL(table_schema)) {
+        ret = OB_TABLE_NOT_EXIST;
+      } else if (OB_FAIL(ObDDLExecutorUtil::write_ai_column_meta(
+                     *sql_proxy, alter_table_arg.table_id_, stmt.get_ai_column_defs(), table_schema))) {
+        LOG_WARN("fail to write ai column meta", K(ret), K(alter_table_arg.table_id_));
+      }
+    }
 
     SERVER_EVENT_ADD("ddl", "alter table execute finish",
       "ret", ret,
